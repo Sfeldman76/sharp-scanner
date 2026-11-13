@@ -4646,6 +4646,236 @@ def v55_archived_spread_orientation_overlap_audit(market_rows, archived_referenc
         'note':'Use original provider schema/documentation to certify the sign. Quote overlap cannot prove original vintage or execution.'}
 
 
+
+# V55 MARKET-RESIDUAL / CONDITIONAL-EXPERT RESEARCH — SHADOW ONLY
+# Frozen original capture and independently priced ROI remain separate.
+def v55_research_spread_references(market_rows, archived_reference_rows):
+    """Exact canonical quotes, held on duplicate identity. No sign guessing."""
+    by={};ambiguous=set()
+    for source,collection in (('VERIFIED_PREKICK_SNAPSHOT',market_rows or []),
+                              ('UNTIMED_ARCHIVE_REFERENCE',archived_reference_rows or [])):
+        local={};dup=set()
+        for rec in collection:
+            try:key=(int(rec['season']),str(rec['game_id']))
+            except (KeyError,ValueError,TypeError):continue
+            if key in local:dup.add(key)
+            local[key]=rec
+        for key,rec in local.items():
+            if key in dup:
+                ambiguous.add((source,key))
+                continue
+            col='spread_home_line' if source=='VERIFIED_PREKICK_SNAPSHOT' else 'spread_home_line_research'
+            if source=='UNTIMED_ARCHIVE_REFERENCE' and not (
+                rec.get('reference_type')=='UNTIMED_HISTORICAL_PROVIDER_MEDIAN' and
+                rec.get('spread_orientation')=='ASSUMED_HOME_QUOTE_UNVERIFIED' and
+                rec.get('pregame_capture_verified') is False and
+                rec.get('executable_price_verified') is False):continue
+            line=_v55_fh_finite(rec.get(col))
+            if not math.isfinite(line) or abs(line)>70:continue
+            if source=='VERIFIED_PREKICK_SNAPSHOT' or key not in by:
+                by[key]={'line':line,'source':source,'is_executable':False}
+    return by,{'ambiguous_source_game_keys':len(ambiguous),
+                'verified_prekick_reference_games':sum(v['source']=='VERIFIED_PREKICK_SNAPSHOT' for v in by.values()),
+                'untimed_archive_reference_games':sum(v['source']=='UNTIMED_ARCHIVE_REFERENCE' for v in by.values()),
+                'archive_orientation_certified':False,'bet_authority':0}
+
+
+def v55_residual_cdf_calibration_payload(rows, predictions):
+    """Distribution of ONLY previous out-of-fold score errors for future SHADOW."""
+    import numpy as np
+    xs=[_v55_fh_finite(r['margin'])-float(predictions[i])
+        for i,r in enumerate(rows) if i<len(predictions) and int(r.get('season') or 0)<=2025 and
+        math.isfinite(_v55_fh_finite(r.get('margin'))) and
+        math.isfinite(_v55_fh_finite(predictions[i]))]
+    if len(xs)<240:return None
+    knots=np.quantile(np.asarray(xs,dtype=float),np.linspace(0.,1.,101))
+    return {'method':'OOF_RESIDUAL_EMPIRICAL_QUANTILES_101_SHADOW',
+            'quantiles':[round(float(x),6) for x in knots],
+            'oof_residual_games':len(xs),'gaussian_shrink_weight':0.25,
+            'original_quote_capture_certified':False,'bet_authority':0}
+
+
+def v55_prior_year_residual_probability_research(rows, predictions, market_rows,
+                                                   archived_reference_rows, *, min_prior=240):
+    """Same-game score-vs-line Brier, with residual CDF trained on EARLIER seasons.
+
+    Does not fit to same-year ATS labels, select orientation from outcomes, or
+    claim archive as-of capture. Compared with Gaussian on identical games.
+    """
+    import bisect
+    from statistics import pstdev
+    refs,coverage=v55_research_spread_references(market_rows,archived_reference_rows)
+    byseason=defaultdict(list)
+    for i,r in enumerate(rows):
+        if i>=len(predictions) or int(r.get('season') or 0)>2025:continue
+        x=_v55_fh_finite(predictions[i]);y=_v55_fh_finite(r.get('margin'))
+        if math.isfinite(x) and math.isfinite(y):
+            byseason[int(r['season'])].append((str(r['game_id']),x,y,r))
+    groups=defaultdict(list);prior=[];folds=[]
+    for yr in sorted(byseason):
+        current=byseason[yr]
+        if len(prior)>=min_prior:
+            residuals=sorted(prior)
+            mu=sum(residuals)/len(residuals)
+            sigma=pstdev(residuals)
+            if sigma>0:
+                n=len(residuals)
+                graded=0
+                for gid,pred,actual,_ in current:
+                    ref=refs.get((yr,gid))
+                    if ref is None:continue
+                    line=float(ref['line']);t=-line-pred
+                    norm=1-NormalDist(mu=mu,sigma=sigma).cdf(t)
+                    # Laplace smoothing, then shrink to prior Gaussian forecast.
+                    ecdf=(n-bisect.bisect_right(residuals,t)+0.5)/(n+1)
+                    hybrid=0.75*ecdf+0.25*norm
+                    grade=actual+line
+                    if abs(grade)<1e-9:continue  # push is neither loss nor win
+                    truth=1. if grade>0 else 0.
+                    groups[ref['source']].append((yr,truth,norm,hybrid))
+                    graded+=1
+                folds.append({'season':yr,'earlier_oof_residual_games':n,'graded_spread_games':graded})
+        # Only after evaluating the entire season can its residuals enter fit.
+        prior.extend((actual-pred for _,pred,actual,_ in current))
+    result={'status':'EXPLORATORY_CHRONOLOGICAL_RESIDUAL_CDF_PROBABILITY',
+            'policy':'CALIBRATE_FROM_PRIOR_SEASONS_OOF_MARGIN_RESIDUALS_ONLY',
+            'residual_calibration_folds':folds,'reference_coverage':coverage,
+            'original_asof_feature_and_quote_vintage_certified':False,
+            'uses_2026_results':False,'bet_authority':0}
+    for src,recs in groups.items():
+        n=len(recs)
+        gauss=sum((a-p)**2 for _,a,p,_ in recs)/n
+        emp=sum((a-p)**2 for _,a,_,p in recs)/n
+        result[src]={'graded_games':n,'brier_gaussian':round(gauss,6),
+            'brier_empirical_shrink':round(emp,6),
+            'brier_improvement_gaussian_minus_empirical':round(gauss-emp,6),
+            'by_season':[{'season':year,'games':sum(v[0]==year for v in recs)}
+                         for year in sorted({v[0] for v in recs})],
+            'pricing_certified':False,'source_orientation_certified':False}
+    if not groups:result['hold']='NO_CROSS_SEASON_GRADED_SPREAD_REFERENCES'
+    return result
+
+
+def v55_expert_first_spread_research(rows, core_oof, combined_oof,
+                                     market_rows, archived_reference_rows):
+    """Independently originate on recorded directional firings, not CORE gates.
+
+    Each unique canonical game counts once PER expert family; correlated
+    families are not independent trials. A reconstructed signal is not a
+    frozen/original bet observation. The archived spread sign is uncertified.
+    """
+    refs,coverage=v55_research_spread_references(market_rows,archived_reference_rows)
+    results=defaultdict(list);pairs=defaultdict(list)
+    for i,r in enumerate(rows):
+        key=(int(r['season']),str(r['game_id']))
+        if key[0]>2025:continue  # no 2026 settled results in retrospective research
+        ref=refs.get(key)
+        if ref is None:continue
+        line=ref['line'];actual=float(r['margin'])+line
+        if abs(actual)<1e-9:continue
+        features=r.get('features') or {}
+        cp=_v55_fh_finite(core_oof[i]) if i<len(core_oof) else float('nan')
+        mp=_v55_fh_finite(combined_oof[i]) if i<len(combined_oof) else float('nan')
+        directional_for_game=[]
+        for fam in _V55_FH_FAMILIES:
+            prefix='EVIDENCE_spreads_'+fam
+            if _v55_fh_finite(features.get(prefix+'_RECORDED_FIRE'))!=1.:continue
+            net=_v55_fh_finite(features.get(prefix+'_NET'))
+            if not math.isfinite(net) or net==0:continue
+            side='HOME' if net>0 else 'AWAY'
+            directional_for_game.append((fam,side))
+            expert_win=(actual>0) if side=='HOME' else (actual<0)
+            core_side=('HOME' if cp+line>0 else 'AWAY') if math.isfinite(cp) else None
+            combined_side=('HOME' if mp+line>0 else 'AWAY') if math.isfinite(mp) else None
+            results[(ref['source'],fam)].append({'season':key[0],
+                'expert_win':int(expert_win),'core_side':core_side,'combined_side':combined_side,
+                'core_win':int((actual>0) if core_side=='HOME' else (actual<0)) if core_side else None,
+                'expert_conflicts_core':core_side is not None and side!=core_side,
+                'expert_conflicts_combined':combined_side is not None and side!=combined_side})
+        # Fixed pairwise same-direction hypotheses; opposing directions veto.
+        # Both families must have a recorded nonzero directional net.
+        from itertools import combinations
+        for (f1,s1),(f2,s2) in combinations(sorted(directional_for_game),2):
+            tag=ref['source']+'__'+f1+'__'+f2
+            pairs[tag].append({'season':key[0], 'agree':s1==s2,
+                'win':int((actual>0) if s1=='HOME' else (actual<0)) if s1==s2 else None,
+                'against_core':bool(core_side is not None and s1!=core_side) if s1==s2 else None})
+    out={'status':'EXPLORATORY_EXPERT_FIRST_DIRECTIONAL_PAIRED_ABLATION',
+         'reference_coverage':coverage,'family_observations_are_not_independent':True,
+         'original_brain_firings_and_quote_vintage_certified':False,
+         'uses_2026_results':False,'bet_authority':0,'families':{}}
+    for (src,fam),sample in sorted(results.items()):
+        n=len(sample);wins=sum(r['expert_win'] for r in sample)
+        core=[r for r in sample if r['core_win'] is not None]
+        disagreements=[r for r in sample if r['expert_conflicts_core']]
+        out['families'][src+'__'+fam]={
+            'graded_unique_game_family_pairs':n,'wins':wins,
+            'directional_ats_win_rate':round(wins/n,6),
+            'matched_core_games':len(core),
+            'core_ats_rate_on_identical_games':round(sum(r['core_win'] for r in core)/len(core),6) if core else None,
+            'core_disagreement_games':len(disagreements),
+            'expert_win_rate_when_disagree_with_core':round(sum(r['expert_win'] for r in disagreements)/len(disagreements),6) if disagreements else None,
+            'seasons':sorted({r['season'] for r in sample}),
+            'research_sufficiency':'DESCRIPTIVE_ONLY_SMALL_SAMPLE' if n<100 else 'DESCRIPTIVE_ONLY_UNATTESTED_VINTAGE',
+            'no_independent_bet_certification':True}
+    out['same_side_pairwise_confluence']={}
+    for name,items in sorted(pairs.items()):
+        agree=[r for r in items if r['agree']]
+        oppose=sum(not r['agree'] for r in items)
+        n=len(agree);w=sum(r['win'] for r in agree)
+        out['same_side_pairwise_confluence'][name]={
+            'same_direction_games':n,'conflicting_direction_games':oppose,
+            'recorded_wins':w,'recorded_losses':n-w,
+            'ats_win_rate':round(w/n,6) if n else None,
+            'core_disagreement_games':sum(bool(r['against_core']) for r in agree),
+            'unverified_family_independence':True,
+            'no_executable_roi_or_authority':True}
+    return out
+
+
+def v55_market_anchored_core_research(rows, core_oof, market_rows,
+                                      archived_reference_rows, *, min_prior_games=240):
+    """Prior-season-only market-vs-CORE weighting study. Never selects live weight.
+
+    Archive is untimed; weights and findings are exploratory, not available
+    for retrospective execution claims or live authority selection.
+    """
+    refs,cov=v55_research_spread_references(market_rows,archived_reference_rows)
+    by_source=defaultdict(lambda:defaultdict(list))
+    for i,r in enumerate(rows):
+        if i>=len(core_oof) or int(r.get('season') or 0)>2025:continue
+        pred=_v55_fh_finite(core_oof[i]);ref=refs.get((int(r['season']),str(r['game_id'])))
+        if ref is None or not math.isfinite(pred):continue
+        by_source[ref['source']][int(r['season'])].append((pred,-ref['line'],float(r['margin'])))
+    weights=(0.,0.25,0.5,0.75,1.)
+    result={'status':'EXPLORATORY_MARKET_ANCHORED_CORE_NOT_DEPLOYED',
+            'reference_coverage':cov,'weights_market_share':[float(v) for v in weights],
+            'weight_selection':'EARLIER_SEASONS_ONLY_MINIMUM_240_GAMES',
+            'fixed_original_quote_vintage_certified':False,'bet_authority':0,'by_source':{}}
+    for src,seasons in sorted(by_source.items()):
+        history=[];observed=[];folds=[]
+        for yr in sorted(seasons):
+            test=seasons[yr]
+            if len(history)>=min_prior_games:
+                errors={w:sum(abs((1-w)*c+w*m-y) for c,m,y in history)/len(history) for w in weights}
+                # Fixed deterministic tie-break to favor the independent model.
+                chosen=min(weights,key=lambda w:(errors[w],w))
+                for c,m,y in test:observed.append((yr,abs(c-y),abs((1-chosen)*c+chosen*m-y),abs(m-y)))
+                folds.append({'season':yr,'prior_quote_games':len(history),'test_games':len(test),
+                    'selected_market_weight_from_prior_seasons':chosen})
+            history.extend(test)
+        if observed:
+            n=len(observed)
+            result['by_source'][src]={'tested_games':n,'season_forward_folds':folds,
+                'core_oof_mae':round(sum(r[1] for r in observed)/n,6),
+                'market_anchored_oof_mae':round(sum(r[2] for r in observed)/n,6),
+                'market_reference_mae':round(sum(r[3] for r in observed)/n,6),
+                'not_usable_to_certify_executable_betting_edges':True}
+        else:result['by_source'][src]={'status':'HOLD_NO_PRIOR_SEASON_REFERENCE_FOLD',
+                                        'reference_game_seasons':sorted(seasons)}
+    return result
+
+
 def v55_fit_independent_score_stack(rows, base_core, base_stat, *, min_train=240, min_test=30):
     """Season-forward CORE/STAT margin OOF stack with OPTIONAL expert evidence.
 
@@ -4864,6 +5094,28 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,context_
         brain_audit_rows.extend(v55_build_seven_brain_game_audit(rows,allpred))
     coverage['seven_brain_oof_margin_coverage']={name:int(np.isfinite(allpred.get(name,np.array([]))).sum())
         for name in ('FULL_CORE_margin','FULL_STAT_margin','FULL_COMBINED_margin','FULL_STACKED_margin')}
+    # Keep objective score forecasting and ATS-specific research separate.
+    # These are nested chronological, price-source-specific SHADOW studies;
+    # they cannot select archive orientation or issue live betting certificates.
+    if core_margin is not None:
+        report['expert_first_spread_research']=v55_expert_first_spread_research(
+            rows,core_margin,allpred.get('FULL_COMBINED_margin',[]),
+            market_rows,archived_reference_rows)
+        report['market_anchored_core_research']=v55_market_anchored_core_research(
+            rows,core_margin,market_rows,archived_reference_rows)
+    report['residual_probability_calibration_research']={}
+    for score_name in ('FULL_CORE_margin','FULL_STAT_margin','FULL_COMBINED_margin','FULL_STACKED_margin'):
+        preds=allpred.get(score_name)
+        if preds is None:continue
+        report['residual_probability_calibration_research'][score_name]=(
+            v55_prior_year_residual_probability_research(
+                rows,preds,market_rows,archived_reference_rows))
+        # Serializing calibrated residual quantiles does not alter the already
+        # certified Gaussian probability or the existing authority contract.
+        if score_name in fitted:
+            q=v55_residual_cdf_calibration_payload(rows,preds)
+            if q is not None:fitted[score_name]['residual_cdf_shadow']=q
+    report['model_selection_policy']='NO_AUTOMATIC_MARKET_BLEND_OR_EXPERT_PROMOTION__REQUIRES_EXACT_VINTAGE_AND_PRICE_OOS'
     # The full-history combined score learner, rather than the small 2025
     # spread classifier, is the eligible source for multiseason price research.
     # Preserve uncertainty, book-side and price-format holds explicitly.

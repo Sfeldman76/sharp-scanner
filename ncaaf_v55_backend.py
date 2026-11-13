@@ -2079,6 +2079,68 @@ def _v55_fh_finite(x):
         return v if math.isfinite(v) else float('nan')
     except (TypeError, ValueError):return float('nan')
 
+def v55_shadow_residual_cdf_probability(point_forecast, target, payload):
+    """Empirical OOF residual distribution: SHADOW, never signed-authority p."""
+    import bisect
+    q=payload.get('quantiles') if isinstance(payload,dict) else None
+    if not isinstance(q,list) or len(q)!=101 or payload.get('method')!=            'OOF_RESIDUAL_EMPIRICAL_QUANTILES_101_SHADOW':return None
+    if int(payload.get('oof_residual_games') or 0)<240:return None
+    try:
+        vals=[float(x) for x in q]
+        x=float(target)-float(point_forecast)
+        if any(not math.isfinite(v) for v in vals) or vals!=sorted(vals) or not math.isfinite(x):return None
+        pos=bisect.bisect_right(vals,x)
+        if pos==0:cdf=0.
+        elif pos>=len(vals):cdf=1.
+        else:
+            low=vals[pos-1];high=vals[pos]
+            frac=(x-low)/(high-low) if high>low else 0.5
+            cdf=(pos-1+frac)/100.
+        return max(0.,min(1.,1.-cdf))
+    except (ValueError,TypeError,OverflowError):return None
+
+
+def v55_validate_shadow_quote_pairs(quotes):
+    """Veto missing/ambiguous sides, stale-mismatched twins and broken lines.
+
+    A paired_source_verified flag on ONE row does not prove the presence of
+    an actual same-book opposite side. Do not synthesize the missing twin.
+    """
+    by=defaultdict(list)
+    for q in quotes:
+        if not isinstance(q,dict):continue
+        key=(str(q.get('game_id') or ''),str(q.get('market') or ''),
+             str(q.get('book') or '').strip().lower())
+        by[key].append(q)
+    approved=[];holds=Counter()
+    for (gid,mkt,book),items in by.items():
+        if not gid or not book or mkt not in ('spreads','h2h','totals'):
+            holds['INVALID_QUOTE_PAIR_KEY']+=len(items);continue
+        expected={'OVER','UNDER'} if mkt=='totals' else {'HOME','AWAY'}
+        if len(items)!=2 or {str(x.get('side') or '').upper() for x in items}!=expected:
+            holds['NO_UNIQUE_TWO_SIDED_SAME_BOOK_QUOTE']+=len(items);continue
+        try:
+            a,b=items
+            ak=clock(a.get('kickoff_utc'));bk=clock(b.get('kickoff_utc'))
+            aq=clock(a.get('quote_observed_at_utc'));bq=clock(b.get('quote_observed_at_utc'))
+            if not all((ak,bk,aq,bq)) or ak!=bk or abs((aq-bq).total_seconds())>120:
+                holds['QUOTE_PAIR_KICKOFF_OR_CAPTURE_TIME_CONFLICT']+=2;continue
+            if profit(a.get('odds')) is None or profit(b.get('odds')) is None:
+                holds['INVALID_QUOTE_PAIR_ODDS']+=2;continue
+            if mkt=='spreads':
+                av=_v55_fh_finite(a.get('line'));bv=_v55_fh_finite(b.get('line'))
+                if not all(math.isfinite(v) for v in (av,bv)) or abs(av+bv)>1e-6:
+                    holds['QUOTE_PAIR_OPPOSITE_SPREAD_INVALID']+=2;continue
+            if mkt=='totals':
+                av=_v55_fh_finite(a.get('line'));bv=_v55_fh_finite(b.get('line'))
+                if not all(math.isfinite(v) for v in (av,bv)) or abs(av-bv)>1e-6:
+                    holds['QUOTE_PAIR_TOTAL_MISMATCH']+=2;continue
+        except (ValueError,TypeError,KeyError,OverflowError):
+            holds['INVALID_QUOTE_PAIR_SOURCE']+=2;continue
+        approved.extend(items)
+    return approved,holds
+
+
 def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     """Score audited forward feature snapshots and actual fresh paired quotes.
 
@@ -2089,20 +2151,36 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     now=now or datetime.now(timezone.utc)
     if now.tzinfo is None:raise ValueError('NAIVE_NOW')
     by_id={str(r.get('game_id') or r.get('Game_ID')):r for r in inputs if isinstance(r,dict)}
+    # The input may contain one quote claiming paired_source_verified without
+    # its other side. Accept only genuinely same-book paired line/odds rows.
+    quotes,quote_holds=v55_validate_shadow_quote_pairs(quotes)
     signal_counts=defaultdict(set)
     directional_counts=Counter()
-    for s in signals:
-        key=str(s.get('game_id') or s.get('Game_ID') or '')
-        fam=str(s.get('source_family') or s.get('Source_Family') or '').upper()
-        if key and fam in ('CORE','STAT','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH'):
+    # Exact accepted event kickoff by game. Do not attribute stale, fabricated
+    # or postgame expert evidence to the live prospective shadow.
+    kickoffs={str(q['game_id']):clock(q.get('kickoff_utc')) for q in quotes}
+    signal_holds=Counter()
+    for ev in signals:
+        if not isinstance(ev,dict):continue
+        key=str(ev.get('game_id') or ev.get('Game_ID') or '')
+        fam=family(ev.get('source_family') or ev.get('Source_Family'))
+        signal_time=clock(ev.get('signal_observed_at_utc') or ev.get('Signal_Observed_At_UTC'))
+        kickoff=kickoffs.get(key)
+        if not key or not kickoff or not signal_time or not signal_time<=now<kickoff:
+            signal_holds['NO_VERIFIABLE_CURRENT_PREGAME_EXPERT_CAPTURE']+=1;continue
+        if not truth(ev.get('direction_verified')):
+            signal_holds['EXPERT_DIRECTION_NOT_VERIFIED']+=1;continue
+        if fam in ('CORE','STAT','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH'):
             signal_counts[key].add(fam)
-        market=str(s.get('market') or s.get('Market') or '').lower()
-        side=str(s.get('side') or s.get('Side') or '').upper()
-        if key and fam in _V55_FH_FAMILIES and market in ('spreads','h2h','totals') and side in ('HOME','AWAY','OVER','UNDER'):
-            # This is only a shadow evidence count, never a certification.
-            uniq=str(s.get('system_id') or s.get('System_ID') or '')
-            directional_counts[(key,market,side,fam,uniq)]+=1
-    result=[];holds=Counter();records=[]
+        mkt=market(ev.get('market') or ev.get('Market'))
+        side=str(ev.get('side') or ev.get('Side') or '').upper()
+        if key and fam in _V55_FH_FAMILIES and mkt in ('spreads','h2h','totals') and side in ('HOME','AWAY','OVER','UNDER'):
+            # A duplicated system-id must not count twice as independent support.
+            ident=str(ev.get('system_id') or ev.get('System_ID') or '').strip()
+            if not ident:
+                signal_holds['EXPERT_MISSING_UNIQUE_SYSTEM_ID']+=1;continue
+            directional_counts[(key,mkt,side,fam,ident)]=1
+    result=[];holds=Counter(quote_holds);holds.update(signal_holds);records=[]
     for q in quotes:
         gid=str(q.get('game_id') or '')
         r=by_id.get(gid)
@@ -2111,7 +2189,7 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
             kick=datetime.fromisoformat(str(q['kickoff_utc']).replace('Z','+00:00'))
             asof=datetime.fromisoformat(str(r['feature_asof_utc']).replace('Z','+00:00'))
             quoted=datetime.fromisoformat(str(q['quote_observed_at_utc']).replace('Z','+00:00'))
-            if any(t.tzinfo is None for t in (kick,asof,quoted)) or not asof<kick or not quoted<=now<kick:
+            if any(t.tzinfo is None for t in (kick,asof,quoted)) or not asof<=now<kick or not quoted<=now<kick:
                 holds['FEATURE_OR_QUOTE_CHRONOLOGY_INVALID']+=1;continue
         except (ValueError,TypeError,KeyError):holds['MISSING_VERIFIABLE_FEATURE_TIME']+=1;continue
         raw=r.get('core_features')
@@ -2189,11 +2267,23 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
             # qualified ROI/EV contract. Prices are the exact current quote.
             net=profit(q.get('odds'))
             estimated_ev=(probability*net-(1-probability)) if net is not None else None
+            empirical=v55_shadow_residual_cdf_probability(p,threshold,spec.get('residual_cdf_shadow'))
+            if empirical is not None:
+                if side in ('AWAY','UNDER'):empirical=1.-empirical
+                gaussian=1-NormalDist(mu=p,sigma=sigma).cdf(threshold)
+                weight=float(spec['residual_cdf_shadow'].get('gaussian_shrink_weight',0.25))
+                hybrid=(1.-weight)*empirical+weight*(gaussian if side in ('HOME','OVER') else 1.-gaussian)
+                # H2H and totals likewise use the exact priced side. These
+                # variants are diagnostics until independently validated.
+            else:hybrid=None
             per[brain]={'predicted_home_margin_or_total':round(p,5),
                         'shadow_probability':round(probability,6),
                         'shadow_ev_per_unit':round(estimated_ev,6) if estimated_ev is not None else None,
                         'positive_ev_shadow':estimated_ev is not None and estimated_ev>0,
-                        'sigma':sigma}
+                        'sigma':sigma,
+                        'research_residual_cdf_probability':round(hybrid,6) if hybrid is not None else None,
+                        'research_residual_cdf_ev_per_unit':round(hybrid*net-(1-hybrid),6) if hybrid is not None and net is not None else None,
+                        'research_calibration_status':'OOF_RESIDUAL_DISTRIBUTION_SHADOW_NOT_ATS_CERTIFIED' if hybrid is not None else 'NO_RESIDUAL_CDF_ARTIFACT'}
         # Independent CORE/STAT OOF-trained stack. This additional model was
         # fit on earlier-season base OOF predictions, not overlapping raw CORE
         # features. All specialist data and Market Rich are optional. It is
@@ -2238,17 +2328,43 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                             p_side=home_p if side=='HOME' else 1-home_p
                             gain=profit(q.get('odds'))
                             edge=p_side*gain-(1-p_side) if gain is not None else None
+                            ep=v55_shadow_residual_cdf_probability(predicted,(-qline if side=='HOME' else qline),
+                                                                      stack.get('residual_cdf_shadow'))
+                            if ep is not None:
+                                if side=='AWAY':ep=1.-ep
+                                wt=float(stack['residual_cdf_shadow'].get('gaussian_shrink_weight',0.25))
+                                ep=(1.-wt)*ep+wt*p_side
                             per['STACKED']={'predicted_home_margin_or_total':round(predicted,5),
                                 'shadow_probability':round(p_side,6),
                                 'shadow_ev_per_unit':round(edge,6) if edge is not None else None,
                                 'positive_ev_shadow':edge is not None and edge>0,
                                 'sigma':sigma,'independent_oof_stack':True,
+                                'research_residual_cdf_probability':round(ep,6) if ep is not None else None,
+                                'research_residual_cdf_ev_per_unit':round(ep*gain-(1-ep),6) if ep is not None and gain is not None else None,
+                                'research_calibration_status':'OOF_RESIDUAL_DISTRIBUTION_SHADOW_NOT_ATS_CERTIFIED' if ep is not None else 'NO_RESIDUAL_CDF_ARTIFACT',
                                 'bet_authority':0}
                         else:holds['STACK_MISSING_VERIFIED_LINE_OR_OOF_SIGMA']+=1
                     else:holds['STACK_NO_NUMERIC_LIVE_FEATURES']+=1
         if per:
+            # Current-book break-even probability, not a fictitious -110.
+            # Source-specific expert origination is allowed to disagree with
+            # CORE; never turn this descriptive conflict into automatic BET.
+            net=profit(q.get('odds'))
+            fair_break_even=1./(1.+net) if net is not None else None
+            side=str(q.get('side') or '').upper()
+            expert_origins=[]
+            for fam in _V55_FH_FAMILIES:
+                if any(k[0]==gid and k[1]==target and k[2]==side and k[3]==fam
+                       for k in directional_counts):expert_origins.append(fam)
+            core_prob=(per.get('CORE') or {}).get('shadow_probability')
+            expert_first=bool(expert_origins and (core_prob is None or core_prob<=fair_break_even))
             records.append({'game_id':gid,'market':target,'side':q.get('side'), 'book':q.get('book'),
                             'quoted_line':q.get('line'),'quoted_odds':q.get('odds'),
+                            'quote_break_even_probability':round(fair_break_even,6) if fair_break_even is not None else None,
+                            'expert_origin_families':sorted(expert_origins),
+                            'expert_first_without_core_value':expert_first,
+                            'expert_origin_is_descriptive_not_certified':True,
+                            'price_comparison_contract':'EXACT_BOOK_SIDE_LINE_ODDS_AND_OBSERVATION',
                             'quote_age_minutes':round((now-quoted).total_seconds()/60.0,2),
                             'shadow_price_status':('REFERENCE_QUOTE_NOT_EXECUTABLE__OVER_15_MIN'
                                                    if (now-quoted).total_seconds()>900
@@ -2261,7 +2377,12 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                             'feature_original_capture_certified':r.get('original_feature_capture_verified') is True,
                             'brain_signal_families':sorted(signal_counts.get(gid,set())),
                             'status':'SHADOW_NOT_AUTHORIZED','bet_authority':0})
+    expert_first_rows=sum(bool(r['expert_first_without_core_value']) for r in records)
+    paired_games={(r['game_id'],r['market'],r['book']) for r in records}
     return {'status':'SHADOW_SCORED' if records else 'HOLD_LIVE_SCORING_INPUTS',
+            'valid_same_book_market_pairs':len(paired_games),
+            'expert_first_shadow_sides':expert_first_rows,
+            'live_probability_policy':'GAUSSIAN_AUTHORITY_PATH_UNCHANGED__RESIDUAL_CDF_RESEARCH_PARALLEL',
             'scored_market_sides':len(records),'scored_games':len(set(r['game_id'] for r in records)),
             'holds':dict(holds),'records':records,'bet_authority':0}
 
