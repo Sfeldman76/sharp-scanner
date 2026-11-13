@@ -390,6 +390,10 @@ def main():
             result['ml_training'] = {'status':'HOLD_ML_TRAINING_EXCEPTION',
                  'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
             log_func('[NCAAF-V55-ML-TRAINING] '+json.dumps(result['ml_training']))
+            # Do not publish an integration-success result or return exit(0)
+            # when a required model/audit export failed.
+            _roi.put_json(registry_uri,result)
+            raise RuntimeError('NCAAF_V55_ML_TRAINING_OR_AUDIT_EXPORT_FAILED') from exc
         result['data_integration_acceptance']=_roi.integration_acceptance_report(
             result.get('historical_seven_brain_replay',{}),
             result.get('historical_warehouse_replay',{}), provider,market_rich,

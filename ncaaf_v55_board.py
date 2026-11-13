@@ -1,9 +1,9 @@
 # NCAAF_V55_REGISTRY_MARKET_GUARDED_FIX_20261102: safe source-checked registry version + snapshot display only
 """NCAAF V5.5 backend-only model publication and scanner-quote handoff.
 
-The installed ncaaf_v552_live.py supplies frozen CORE forecasts. The backend
-quote bridge replaces its unverified market join with fresh, independently
-validated, existing scanner quotes before publication. No V1 fallback.
+The current backend builds the upcoming slate from canonical CFBD forward games.
+The quote bridge uses independently validated scanner prices. No legacy weekly
+scorer, legacy publication path, or V1 fallback.
 """
 from __future__ import annotations
 
@@ -212,39 +212,7 @@ def publish_dataframe(weekly, audit, *, bq_client=None, publication_type="WEEKLY
     return result
 
 
-def publish_weekly_latest(*, storage_client=None, bq_client=None, bucket_name=None, publication_type="WEEKLY"):
-    from google.cloud import storage
-    import ncaaf_v552_live as v55
-    gcs = storage_client or storage.Client()
-    weekly, audit = v55.read_weekly_latest(gcs,bucket_name=bucket_name or os.getenv("MODEL_BUCKET","sharp-models"))
-    # Verify immutable source BEFORE a quote join can update the audit payload.
-    _verify_audit(audit)
-    from google.cloud import bigquery
-    client = bq_client or bigquery.Client(project="sharplogger")
-    # Always reattach the current stored sportsbook quotes on the backend;
-    # weekly and market-only workflows share exactly the same price authority.
-    weekly, audit = bridge_weekly_prices(weekly,audit,bq_client=client,storage_client=gcs,bucket_name=bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
-    return publish_dataframe(weekly,audit,bq_client=client,publication_type=publication_type)
-
-
-def market_refresh_and_publish(*, storage_client=None, bq_client=None, bucket_name=None, log_func=None):
-    """Backend-only V5.5 market repricing. No CORE refit or V1 fallback."""
-    from google.cloud import storage
-    import ncaaf_v552_live as v55
-    log = log_func or logging.info
-    gcs = storage_client or storage.Client()
-    bucket = bucket_name or os.getenv("MODEL_BUCKET","sharp-models")
-    refresh = v55.refresh_market_only(storage_client=gcs,bucket_name=bucket,log_func=log)
-    if not isinstance(refresh,dict) or refresh.get("status")!=SOURCE_STATUS:
-        raise RuntimeError("V55_MARKET_REFRESH_INCOMPLETE:"+str(getattr(refresh,"get",lambda *_:None)("status")))
-    if refresh.get("core_refit") is not False or refresh.get("production_v1_probabilities_used") is not False:
-        raise RuntimeError("V55_MARKET_REFRESH_FROZEN_CORE_CONTRACT_FAIL")
-    if refresh.get("v55_bet_authority",0) != 0:
-        raise RuntimeError("V55_MARKET_REFRESH_UNREVIEWED_BET_AUTHORITY")
-    pub = publish_weekly_latest(storage_client=gcs,bq_client=bq_client,bucket_name=bucket,publication_type="MARKET_REFRESH")
-    log("[NCAAF-V55-BACKGROUND-REFRESH] "+json.dumps(pub,sort_keys=True))
-    return pub
-
+# Retired weekly/market-refresh paths removed. The current backend alone publishes.
 
 def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
     """Read newest COMPLETE V5.5 publication from BigQuery; never infer bets."""

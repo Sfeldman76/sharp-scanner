@@ -3582,6 +3582,33 @@ def publish_v55_ml_artifacts(report,models,*,publish_uri,storage_client=None):
     return {'status':report['status'],'manifest_uri':publish_uri,'models':sorted(names),
             'bet_authority':0}
 
+def _v55_verified_audit_upload(blob, payload, *, content_type, content_encoding=None):
+    """Retry transient GCS upload errors and verify persisted bytes before publication.
+
+    This is strictly a transport repair; it does not change model/evidence values.
+    """
+    import hashlib, time
+    from google.api_core.exceptions import (TooManyRequests, ServiceUnavailable,
+                                            InternalServerError, DeadlineExceeded)
+    expected=hashlib.sha256(payload).hexdigest()
+    last=None
+    for attempt in range(4):
+        try:
+            blob.content_encoding=content_encoding
+            blob.upload_from_string(payload,content_type=content_type,timeout=120)
+            actual=blob.download_as_bytes(timeout=120)
+            if hashlib.sha256(actual).hexdigest()!=expected:
+                raise RuntimeError('V55_AUDIT_REMOTE_SHA256_MISMATCH')
+            return {'sha256':expected,'bytes':len(payload),'verified':True,'attempts':attempt+1}
+        except (ConnectionError, TimeoutError, ConnectionResetError,
+                TooManyRequests, ServiceUnavailable, InternalServerError,
+                DeadlineExceeded) as exc:
+            last=exc
+            if attempt==3:break
+            time.sleep(min(2**attempt,8))
+    raise RuntimeError('V55_AUDIT_GCS_UPLOAD_RETRIES_EXHAUSTED') from last
+
+
 def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
                         dataset='sharp_data',bucket='sharp-models',
                         manifest_uri=None,canonical_uri=None,events_uri=None,market_feed_uri=None,
@@ -3686,11 +3713,11 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         for _row in game_audit_rows:_csv.writerow({k:('' if _row.get(k) is None else _row.get(k)) for k in _fields})
         _blob_key='research/ncaaf/v55/ml/combined_edge_game_audit_latest.csv.gz'
         _blob=_client.bucket(bucket).blob(_blob_key)
-        _blob.content_encoding='gzip'
-        _blob.upload_from_string(
-            gzip.compress(_buf.getvalue().encode('utf-8')),
-            content_type='text/csv')
+        _upload=_v55_verified_audit_upload(
+            _blob,gzip.compress(_buf.getvalue().encode('utf-8')),
+            content_type='application/gzip')
         full_report['game_level_audit']={'status':'PUBLISHED','uri':game_audit_uri,
+          'transport_verification':_upload,
           'rows':len(game_audit_rows),'schema':'V55_COMBINED_EDGE_GAME_AUDIT_V1',
           'contains_both_archive_orientation_hypotheses':True,
           'no_certified_bets_from_retrospective_archive':True}
@@ -3737,10 +3764,11 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
                     elif _flag in ('0','false','no'):_row['away_team']=_name
             _writer.writerow({k:('' if _row.get(k) is None else _row.get(k)) for k in _brain_fields})
         _blob=_client.bucket(bucket).blob('research/ncaaf/v55/ml/seven_brain_game_input_audit_latest.csv.gz')
-        _blob.content_encoding=None
-        _blob.upload_from_string(gzip.compress(_buf.getvalue().encode('utf-8')),
-                                 content_type='application/gzip')
+        _upload=_v55_verified_audit_upload(
+            _blob,gzip.compress(_buf.getvalue().encode('utf-8')),
+            content_type='application/gzip')
         full_report['seven_brain_game_audit']={'status':'PUBLISHED','uri':brain_uri,
+          'transport_verification':_upload,
             'rows':len(brain_audit_rows),'schema':'V55_SEVEN_BRAIN_GAME_INPUT_AUDIT_V2',
             'core_stat_oof_stacked_into_full_stacked_margin':True,
             'legacy_full_combined_is_direct_overlapping_prior_features':True,
@@ -4092,6 +4120,49 @@ def _v55_fh_evidence_features(events, team_map, *, return_trace=False):
                              'NO_RECORDED_FIRE_SOURCE_COVERAGE_UNKNOWN')}
         out[key]=features;trace[key]=game_trace
     return (out,trace) if return_trace else out
+
+
+def _v55_frozen_event_ingest_diagnostics(events, team_map):
+    """Account for event-level input BEFORE any family-level net aggregation.
+
+    Retains raw-versus-unique counts and explicit invalid/unknown directions;
+    never turns an unobserved brain into a zero-confidence vote.
+    """
+    from collections import Counter
+    by_family=Counter(); by_market=Counter(); rejected=Counter(); seen=set()
+    for e in events:
+        try:
+            family=str(e['brain']); market=str(e['market'])
+            season=int(e['season']); game=str(e['cfbd_game_id'])
+            side=str(e['target'])
+        except (KeyError,ValueError,TypeError):
+            rejected['MISSING_CANONICAL_EVENT_FIELDS']+=1;continue
+        if family not in _V55_FH_FAMILIES:
+            rejected['NOT_FOUR_FROZEN_EXPERT_FAMILIES']+=1;continue
+        if market not in ('spreads','h2h','totals'):
+            rejected['UNKNOWN_MARKET']+=1;continue
+        if (season,game) not in team_map:
+            rejected['UNKNOWN_CANONICAL_GAME']+=1;continue
+        sides=team_map[(season,game)]
+        home=[n for n,v in sides.items() if str(v.get('is_home_verified')).lower() in ('1','true','yes')]
+        away=[n for n,v in sides.items() if str(v.get('is_home_verified')).lower() in ('0','false','no')]
+        allowed={'OVER','UNDER'} if market=='totals' else set(home+away)
+        if len(home)!=1 or len(away)!=1 or side not in allowed:
+            rejected['UNVERIFIED_SIDE_OR_ROLE']+=1;continue
+        system=str(e.get('system_id') or e.get('mechanism_id') or '').strip()
+        if not system:
+            rejected['MISSING_SYSTEM_ID']+=1;continue
+        event_id=(season,game,market,side,family,system)
+        if event_id in seen:
+            rejected['DUPLICATE_FROZEN_SYSTEM_FIRING']+=1;continue
+        seen.add(event_id);by_family[family]+=1;by_market[market+'|'+family]+=1
+    return {'source_events':len(events),'accepted_unique_events':len(seen),
+            'accepted_by_family':dict(sorted(by_family.items())),
+            'accepted_by_market_family':dict(sorted(by_market.items())),
+            'rejected':dict(sorted(rejected.items())),
+            'count_reconciled':len(seen)+sum(rejected.values())==len(events),
+            'source_capture_certified':False,
+            'CORE_STAT_MARKET_RICH_checked_in_separate_model_lanes':True}
 
 
 def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None, context_by_game=None):
@@ -4983,6 +5054,7 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,context_
             coverage['expert_nonzero_net_by_market_family'][mkt+'_'+fam]=sum(
                 _v55_fh_finite(r['features'].get(col))!=0 for r in rows if col in r['features'])
     coverage['seven_brain_spread_representation']=v55_seven_brain_representation_summary(rows)
+    coverage['frozen_event_ingest_reconciliation']=_v55_frozen_event_ingest_diagnostics(events,team_map)
     report={'schema':_V55_FH_VERSION,'status':'HOLD_FULL_HISTORY_INSUFFICIENT','coverage':coverage,
             'models':{},'same_game_comparison':{},'seven_brain_policy':'CORE_STAT_MINER_BIG_AL_PATHI_PT_MARKET_RICH_FUSED_IN_COMBINED_ML',
             'historical_brain_capture_certified':False,'historical_feature_vintage_certified':False,

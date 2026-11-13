@@ -1691,6 +1691,64 @@ def seven_brain_live_combination_audit(signals, *, max_examples=150):
             'truncated_examples':counts['candidate_sides']>len(examples),
             'automatic_authority':False}
 
+def read_current_cfbd_fixture_slate(bq_client, *, now=None, horizon_days=14):
+    """Read complete home/away upcoming games without the retired weekly module.
+
+    Uses the same approved CFBD forward source and source role verification as
+    the ML feature adapter. Does not synthesize CORE forecasts, betting picks,
+    quote timestamps, or model feature values.
+    """
+    import pandas as pd
+    at=clock(now or datetime.now(timezone.utc))
+    if at is None:raise ValueError('INVALID_NOW')
+    if not 1<=int(horizon_days)<=45:raise ValueError('INVALID_HORIZON')
+    table='sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1'
+    source=read_live_cfbd_rows_from_bq(bq_client,table,(),now=at)
+    groups=defaultdict(list)
+    for item in source:
+        gid=_v55_live_id(item.get('Game_ID'))
+        if gid:groups[gid].append(item)
+    fixtures=[];holds=Counter()
+    for gid,records in sorted(groups.items()):
+        if len(records)!=2:
+            holds['NOT_EXACTLY_TWO_SIDES']+=1;continue
+        hr=[r for r in records if num(r.get('Is_Home'))==1.0]
+        ar=[r for r in records if num(r.get('Is_Home'))==0.0]
+        if len(hr)!=1 or len(ar)!=1:
+            holds['INVALID_HOME_AWAY_ROLE']+=1;continue
+        h,a=hr[0],ar[0]
+        home=s(h.get('Team_Key'));away=s(a.get('Team_Key'))
+        hk=_v55_cfbd_school_key(home);ak=_v55_cfbd_school_key(away)
+        ht=clock(h.get('Game_Date'));at_away=clock(a.get('Game_Date'))
+        if not hk or not ak or hk==ak or not ht or not at_away or abs((ht-at_away).total_seconds())>900:
+            holds['TEAM_OR_KICKOFF_CONFLICT']+=1;continue
+        # Unknown-time CFBD midnight placeholders are allowed for the price
+        # bridge's unique paired-market kickoff verification only.
+        is_placeholder=(ht.astimezone(ZoneInfo('America/New_York')).hour==0
+                        and ht.astimezone(ZoneInfo('America/New_York')).minute==0)
+        if ht>at+timedelta(days=horizon_days) or (ht<=at and not
+                (is_placeholder and ht>=at-timedelta(hours=26))):
+            holds['OUTSIDE_UPCOMING_WINDOW']+=1;continue
+        fixtures.append({'Game_ID':gid,'CFBD_Game_ID':gid,'Season':int(num(h.get('Season'))),
+            'Game_Start_UTC':ht.isoformat(),'Home':home,'Away':away,
+            'Home_Team':home,'Away_Team':away,
+            'Matchup':away+' @ '+home,
+            'Selected_Team':None,
+            'CORE_Projected_Home_Margin':None,
+            'CORE_Residual_SD':None,
+            'CORE_Provenance':'NOT_SCORED__RETIRED_WEEKLY_MODULE_REMOVED',
+            'V55_Bet_Authority':0})
+    frame=pd.DataFrame(fixtures,columns=['Game_ID','CFBD_Game_ID','Season','Game_Start_UTC',
+       'Home','Away','Home_Team','Away_Team','Matchup','Selected_Team',
+       'CORE_Projected_Home_Margin','CORE_Residual_SD','CORE_Provenance','V55_Bet_Authority'])
+    if frame['Game_ID'].duplicated().any():raise RuntimeError('DUPLICATE_CANONICAL_CFBD_SLATE_GAME')
+    audit={'status':'PASS_CFBD_UPCOMING_FIXTURES' if len(frame) else 'HOLD_NO_CFBD_UPCOMING_FIXTURES',
+        'source_table':table,'source_rows':len(source),'games':len(frame),
+        'invalid_or_excluded':dict(holds),'retired_weekly_module_used':False,
+        'core_forecasts_synthesized':False,'bet_authority':0}
+    if frame.empty:raise RuntimeError('NO_CURRENT_CANONICAL_CFBD_FIXTURES:'+json.dumps(audit,sort_keys=True))
+    return frame,audit
+
 def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
     """Production scanner dispatch. ONE NCAAF authority/publisher.
 
@@ -1702,9 +1760,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     import logging
     from google.cloud import storage,bigquery
     from google.api_core.exceptions import NotFound
-    import ncaaf_v552_live as frozen_source
-    # Source-only import: does NOT execute the historical authority, board
-    # publisher, V7 shadow selector, or any other decision-making routine.
+    # No retired weekly CORE module. Current fixture identity comes from CFBD.
     from ncaaf_v55_board import read_scanner_quotes,attach_verified_backend_quotes
     log=log_func or logging.info
     bucket=bucket_name or os.environ.get('MODEL_BUCKET','sharp-models')
@@ -1714,11 +1770,11 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     if mode not in ('SHADOW','LIVE'):
         raise RuntimeError('INVALID_NCAAF_TWO_ENGINE_CUTOVER_MODE')
 
-    # SHA-verifies the GCS frozen weekly snapshot; never call refresh_market_only
-    # or the old market_refresh_and_publish because they invoke old decisions.
-    weekly,source_audit=frozen_source.read_weekly_latest(gcs,bucket_name=bucket)
-    if source_audit.get('production_v1_probabilities_used') is not False:
-        raise RuntimeError('INVALID_FROZEN_FORECAST_PROVENANCE')
+    # Construct the two-sided upcoming fixture slate directly from canonical CFBD
+    # future rows. The separate historical seven-brain and ML artifacts remain
+    # independent; do not reconstruct a retired CORE weekly prediction.
+    weekly,source_audit=read_current_cfbd_fixture_slate(bq)
+    log('[NCAAF-V55-CANONICAL-FIXTURE-SOURCE] '+json.dumps(source_audit,sort_keys=True))
     # Clear older authority and candidate fields from input before the new
     # engine writes a fresh canonical record. Preserve CORE's original pick.
     base=weekly.copy()
