@@ -1354,8 +1354,10 @@ def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
     created=clock(doc.get('created_utc'))
     if not created or not at or created>at:
         return None,'INVALID_QUALIFICATION_PUBLICATION_TIME'
-    if doc.get('validation_contract')!='INDEPENDENT_CHRONOLOGICAL_ROLLING_FOLDS_OR_LEGACY_PROOF':
-        return None,'UNRECOGNIZED_CHRONOLOGICAL_VALIDATION_CONTRACT'
+    if doc.get('validation_contract') not in (
+        'INDEPENDENT_CHRONOLOGICAL_ROLLING_FOLDS_OR_LEGACY_PROOF',
+        'HISTORICAL_FULL_RECORD_OR_EXISTING_FROZEN_PROOF'):
+        return None,'UNRECOGNIZED_HISTORICAL_VALIDATION_CONTRACT'
     for entry in doc.get('systems') or []:
         if not isinstance(entry,dict):rejects['BAD_RULE']+=1;continue
         fam=family(entry.get('family'));sid=s(entry.get('system_id'))
@@ -1367,7 +1369,7 @@ def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
             and entry.get('overlap_audit')=='PASS' and entry.get('multiple_testing_audit')=='PASS'
             and entry.get('uses_2026_outcomes') is False
             and (entry.get('independent_preholdout_freeze_ref') or
-                 entry.get('validation_type')=='INDEPENDENT_ROLLING_FOLDS')
+                 entry.get('validation_type') in ('INDEPENDENT_ROLLING_FOLDS','HISTORICAL_FULL_RECORD'))
             and entry.get('source_pinned_sha256')
             and not entry.get('holds')):
             rejects['EVIDENCE_ATTESTATION_INCOMPLETE']+=1;continue
@@ -1378,6 +1380,13 @@ def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
                 entry.get('by_season') or {},entry.get('frozen_definition_sha256'))
             if not audit['pass']:
                 rejects['ROLLING_VALIDATION_INCOMPLETE']+=1;continue
+        elif mode=='HISTORICAL_FULL_RECORD':
+            proof=entry.get('historical_validation_audit') or {}
+            if not (proof.get('status')=='PASS' and proof.get('audit_ref') and
+                proof.get('discovery_controls_ref') and
+                proof.get('selection_bias_reviewed') is True and
+                proof.get('source_sha256')==entry.get('source_pinned_sha256')):
+                rejects['HISTORICAL_VALIDATION_PROOF_MISSING']+=1;continue
         elif not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc):
             rejects['RULE_NOT_FROZEN_BEFORE_HOLDOUT']+=1;continue
         try:
@@ -1555,6 +1564,8 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
         audit['qualification_registry_status']=s(document.get('status'))
         audit['qualification_candidates']=int(document.get('candidate_system_count') or 0)
         audit['qualification_systems']=len(document.get('systems') or [])
+        audit['historical_screen_pass_systems_count']=len(document.get('historical_screen_pass_systems') or [])
+        audit['historical_research_not_live_approved']=True
         audit['qualification_hold_counts']=document.get('hold_counts') or {}
         frozen,problem=validate_v55_current_qualification(
             document,raw_sha=hashlib.sha256(raw).hexdigest())
@@ -1666,6 +1677,7 @@ def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
         audit['rule_registry']={'status':s(doc.get('status')),
             'operator_approved':doc.get('operator_approved') is True,
             'candidate_system_count':int(doc.get('candidate_system_count') or 0),
+            'historical_screen_pass_systems_count':len(doc.get('historical_screen_pass_systems') or []),
             'hold_counts':doc.get('hold_counts') or {},
             'validation_hold':hold,'qualified_rule_count':len((qualified or {}).get('rules') or {})}
     except Exception as exc:

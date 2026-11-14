@@ -1334,6 +1334,17 @@ def _v55_qualification_evidence(family, system_id, source_receipts, attestations
             record.get('frozen_definition_sha256'))
         if not rolling.get('pass'):
             holds.add('INDEPENDENT_CHRONOLOGICAL_FOLDS_NOT_ATTESTED')
+    elif validation_type=='HISTORICAL_FULL_RECORD':
+        # Full-history testing is the chosen stability evidence. Do not impose
+        # an additional chronological holdout, but require an identifiable,
+        # source-pinned existing discovery audit (not a self-declared flag).
+        historical=record.get('historical_validation_audit') or {}
+        if not (historical.get('status')=='PASS' and
+                historical.get('audit_ref') and
+                historical.get('discovery_controls_ref') and
+                historical.get('source_sha256')==record.get('pinned_source_sha256') and
+                historical.get('selection_bias_reviewed') is True):
+            holds.add('EXISTING_FULL_HISTORY_VALIDATION_EVIDENCE_NOT_LINKED')
     elif (not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc)
           or selection_end>2023
           or not record.get('independent_preholdout_freeze_ref')):
@@ -1368,9 +1379,12 @@ def _v55_qualification_evidence(family, system_id, source_receipts, attestations
     if not isinstance(multiple,dict):multiple={}
     if not isinstance(independence,dict):independence={}
     if not (multiple.get('status')=='PASS' and multiple.get('audit_ref')
-            and multiple.get('selection_without_holdout_outcomes') is True
+            and (multiple.get('selection_without_holdout_outcomes') is True
+                 if validation_type!='HISTORICAL_FULL_RECORD' else
+                 bool(multiple.get('historical_search_adjustment_ref')))
             and independence.get('status')=='PASS' and independence.get('audit_ref')
-            and (record.get('locked_holdout_ref') or validation_type=='INDEPENDENT_ROLLING_FOLDS')):
+            and (record.get('locked_holdout_ref') or validation_type in
+                 ('INDEPENDENT_ROLLING_FOLDS','HISTORICAL_FULL_RECORD'))):
         holds.add('MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED')
     if record.get('uses_2026_outcomes') is not False:
         holds.add('UNVERIFIED_2026_OUTCOME_EXCLUSION')
@@ -1450,6 +1464,7 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
                 definition_frozen_at_utc=proof.get('definition_frozen_at_utc'),
                 independent_preholdout_freeze_ref=proof.get('independent_preholdout_freeze_ref'),
                 validation_type=proof.get('validation_type','LEGACY_PRE2024_FREEZE'),
+                historical_validation_audit=proof.get('historical_validation_audit'),
                 rolling_folds=proof.get('rolling_folds',[]),
                 frozen_definition_sha256=proof.get('frozen_definition_sha256'),
                 source_pinned_sha256=proof['pinned_source_sha256'],
@@ -1461,6 +1476,23 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
                 data_ready_field=live.get('ready_field'),
                 historical_reference_not_executable_roi=True)
             qualified.append(rule)
+    # Preserve validated historical research independently of live approval.
+    # Unique (family, system_id) records prevent duplicated CORE/system entries.
+    historical_inventory=[]
+    for d in diagnostics:
+        screen=d.get('full_history_statistical_screen') or {}
+        if screen.get('pass') is not True:continue
+        historical_inventory.append({
+            'family':d['family'],'system_id':d['system_id'],'market':d['market'],
+            'evidence_key':d['evidence_key'],'posterior_prob':screen.get('posterior_prob'),
+            'decisive_n':screen.get('decisive_n'),
+            'by_season':d['by_season'],'screen_policy':screen.get('policy'),
+            'source_receipts':source_receipts or {},
+            'passed_existing_historical_screen':True,
+            'live_executable':not bool(d['holds']),
+            'unresolved_live_evidence_holds':d['holds'],
+            'independent_family_key':d['family'],
+            'bet_authority':0})
     approved=bool((attestations or {}).get('_operator_approval',{}).get('approved') is True
         and (attestations or {}).get('_operator_approval',{}).get('audit_ref'))
     status=('FROZEN_OOS_QUALIFIED' if qualified and approved
@@ -1471,12 +1503,14 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
         'history_first_season':min(seasons_seen) if seasons_seen else None,
         'discovery_last_season':None,'confirmation_seasons':[],
         'full_history_seasons':list(range(2013,2026)),
-        'validation_contract':'INDEPENDENT_CHRONOLOGICAL_ROLLING_FOLDS_OR_LEGACY_PROOF',
+        'validation_contract':'HISTORICAL_FULL_RECORD_OR_EXISTING_FROZEN_PROOF',
         'source_audit':{'observed_seasons':sorted(seasons_seen),
            'source_receipts':source_receipts or {},'oos_screen_policy':V55_HISTORY_SCREEN_POLICY,
            'invalid_firings':dict(invalid),
            'attestation_systems_supplied':len([k for k in (attestations or {}) if k!='_operator_approval'])},
-        'systems':qualified,'candidate_system_count':len(diagnostics),
+        'systems':qualified,'historical_screen_pass_systems':historical_inventory,
+        'historical_screen_pass_count':len(historical_inventory),
+        'candidate_system_count':len(diagnostics),
         'candidate_diagnostics':diagnostics,'hold_counts':dict(rejections),
         'retrospective_reference_not_executable_roi':True,
         'independent_original_pregame_capture_certified':False,'bet_authority':0}
@@ -1558,7 +1592,9 @@ def publish_v55_frozen_qualification(report, *, storage_client=None,
         body,content_type='application/json')
     return {'status':report['status'],'uri':uri,'sha256':hashlib.sha256(body).hexdigest(),
             'candidate_systems':report['candidate_system_count'],
-            'qualified_systems':len(report['systems']),'bet_authority':0}
+            'qualified_systems':len(report['systems']),
+            'historical_screen_pass_systems_count':len(report.get('historical_screen_pass_systems') or []),
+            'bet_authority':0}
 
 
 def source_capture_field_diagnostics(raw):
