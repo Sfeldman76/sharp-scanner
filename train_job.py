@@ -199,6 +199,130 @@ def _v55_live_audit_safe_error(exc):
     return type(exc).__name__ + ': ' + str(exc)[:400]
 
 
+def _v55_live_qualification_evidence_reconcile(gcs, bucket, backend):
+    """Read-only, per-rule qualification/provenance reconciliation.
+
+    A descriptive history screen is not freeze/feature-vintage proof. Never
+    populate live captures or change the issuer's approved registry here.
+    """
+    registry_key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
+        'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
+    evidence_key=os.getenv('NCAAF_V55_QUALIFICATION_EVIDENCE_KEY',
+        'research/ncaaf/v55/qualification_evidence/current.json')
+    recovery_key='research/ncaaf/v55/qualification_evidence/recovery_queue_latest.json'
+    def load(key):
+        try:
+            blob=gcs.bucket(bucket).blob(key)
+            payload=blob.download_as_bytes()
+            return json.loads(payload),hashlib.sha256(payload).hexdigest(),None
+        except Exception as exc:
+            return None,None,type(exc).__name__+':'+str(exc)[:160]
+    registry,digest,error=load(registry_key)
+    out={'status':'HOLD_QUALIFICATION_SOURCE_UNAVAILABLE' if error else 'RESEARCH_EVIDENCE_RECONCILED__NO_AUTO_CERTIFICATION',
+         'registry_uri':'gs://'+bucket+'/'+registry_key,
+         'registry_sha256':digest,'registry_read_error':error,
+         'qualifying_rules_published':0,'automatically_approved':False,
+         'historical_screen_not_oos_proof':True,'retrospective_evidence_not_live_capture':True,
+         'by_family':{},'reason_counts':{},'candidate_examples':[],'bet_authority':0}
+    if not isinstance(registry,dict):return out
+    out['issuer_status']=registry.get('status')
+    out['candidate_system_count']=registry.get('candidate_system_count')
+    out['operator_approved']=registry.get('operator_approved') is True
+    out['qualifying_rules_published']=len(registry.get('systems') or [])
+    accepted,hold=backend.validate_v55_current_qualification(registry,raw_sha=digest)
+    out['backend_registry_validation_hold']=hold
+    out['backend_accepted_rules']=len((accepted or {}).get('rules') or {})
+    evidence,_,evidence_error=load(evidence_key)
+    out['attestation_source_uri']='gs://'+bucket+'/'+evidence_key
+    out['attestation_source_error']=evidence_error
+    evidence=evidence if isinstance(evidence,dict) else {}
+    out['attestation_records_supplied']=sum(k!='_operator_approval' and isinstance(v,dict) for k,v in evidence.items())
+    out['operator_approval_receipt_supplied']=bool(isinstance(evidence.get('_operator_approval'),dict)
+        and evidence['_operator_approval'].get('approved') is True
+        and evidence['_operator_approval'].get('audit_ref'))
+    recovery,_,recovery_error=load(recovery_key)
+    out['recovery_queue_uri']='gs://'+bucket+'/'+recovery_key
+    out['recovery_queue_read_error']=recovery_error
+    if isinstance(recovery,dict):out['recovery_queue_systems']=recovery.get('system_count')
+    source_receipts=((registry.get('source_audit') or {}).get('source_receipts') or {})
+    reasons=_v55_audit_Counter();by_family=_v55_audit_defaultdict(lambda:{'candidates':0,'historical_screen_pass':0,'attestation_present':0,'missing_evidence':0})
+    candidates=registry.get('candidate_diagnostics') or []
+    for rec in candidates:
+        if not isinstance(rec,dict):reasons['INVALID_CANDIDATE_RECORD']+=1;continue
+        fam=str(rec.get('family') or 'UNKNOWN');sid=str(rec.get('system_id') or '')
+        key=fam+'|'+sid
+        row=by_family[fam];row['candidates']+=1
+        original=rec.get('by_season') or {}
+        try:
+            screen=backend.v55_full_history_statistical_screen(original)
+        except Exception:
+            screen={'pass':False,'reason':'INVALID_SEASON_GRADES'}
+        reported=rec.get('full_history_statistical_screen') or {}
+        consistent=(screen.get('pass')==reported.get('pass')
+            and screen.get('posterior_prob')==reported.get('posterior_prob')
+            and screen.get('decisive_n')==reported.get('decisive_n'))
+        holds=list(rec.get('holds') or [])
+        if not consistent:holds.append('HISTORICAL_STATISTICAL_RECOMPUTATION_MISMATCH')
+        if screen.get('pass') is True:row['historical_screen_pass']+=1
+        att=evidence.get(key)
+        if isinstance(att,dict):
+            row['attestation_present']+=1
+            name=str(att.get('pinned_source_name') or '')
+            source=source_receipts.get(name)
+            if not (isinstance(source,dict) and len(str(source.get('sha256') or ''))==64
+                and source['sha256']==att.get('pinned_source_sha256')):
+                holds.append('PINNED_SOURCE_RECEIPT_NOT_MATCHED')
+            if att.get('uses_2026_outcomes') is not False:
+                holds.append('OUTCOME_LEAKAGE_EXCLUSION_UNVERIFIED')
+            if att.get('validation_type')=='INDEPENDENT_ROLLING_FOLDS':
+                foldcheck=backend.v55_validate_rolling_folds(att.get('rolling_folds'),original,
+                    att.get('frozen_definition_sha256'))
+                if not foldcheck.get('pass'):
+                    holds.append('INDEPENDENT_ROLLING_FOLDS_NOT_VERIFIED')
+            else:
+                freeze=backend.clock(att.get('definition_frozen_at_utc'))
+                if (freeze is None or freeze.year>=2024 or
+                    not att.get('independent_preholdout_freeze_ref')):
+                    holds.append('INDEPENDENT_PRE_HOLDOUT_FREEZE_NOT_ATTESTED')
+            live=att.get('live_recipe') or {}
+            if not (isinstance(live,dict) and live.get('role')=='directional'
+                and live.get('market')=='spreads' and live.get('direction') in ('PLAY_ON','FADE')
+                and live.get('feature_parity_ref')):
+                holds.append('EXECUTABLE_LIVE_RULE_RECIPE_MISSING')
+            vint=att.get('pregame_feature_audit') or {}
+            if not (isinstance(vint,dict) and vint.get('status')=='PASS' and
+                vint.get('source_ref') and vint.get('leakage_audit_ref') and
+                vint.get('all_features_available_before_game') is True):
+                holds.append('PREGAME_FEATURE_VINTAGE_NOT_ATTESTED')
+            mult=att.get('multiple_testing_audit') or {}
+            indep=att.get('source_independence_audit') or {}
+            if not (isinstance(mult,dict) and mult.get('status')=='PASS' and mult.get('audit_ref')
+                and mult.get('selection_without_holdout_outcomes') is True
+                and isinstance(indep,dict) and indep.get('status')=='PASS' and indep.get('audit_ref')):
+                holds.append('MULTIPLICITY_OR_INDEPENDENCE_PROOF_MISSING')
+        else:
+            holds.append('NO_INDEPENDENT_SYSTEM_ATTESTATION')
+        if holds:row['missing_evidence']+=1
+        reasons.update(set(holds))
+        if len(out['candidate_examples'])<16 and (screen.get('pass') or isinstance(att,dict)):
+            out['candidate_examples'].append({'evidence_key':key,
+                'history_posterior':screen.get('posterior_prob'),
+                'history_screen_pass':screen.get('pass'),
+                'attestation_present':isinstance(att,dict),
+                'unresolved_holds':sorted(set(holds))[:12]})
+    out['by_family']={k:v for k,v in sorted(by_family.items())}
+    out['reason_counts']=dict(reasons.most_common())
+    out['candidate_rows_inspected']=len(candidates)
+    out['candidate_count_reconciles']=(len(candidates)==registry.get('candidate_system_count'))
+    if out['backend_accepted_rules']:
+        out['status']='CERTIFIED_REGISTRY_RULES_AVAILABLE_FOR_PRODUCER'
+    elif not evidence:
+        out['status']='HOLD_INDEPENDENT_ATTESTATION_SOURCE_ABSENT'
+    else:
+        out['status']='HOLD_INDEPENDENT_RULE_PROOFS_OR_OPERATOR_APPROVAL'
+    return out
+
+
 def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games=0,
         live_manifest_uri=None, extra_quotes_uri=None):
     import joblib
@@ -318,6 +442,12 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
         found=stage('original_live_seven_brain_events',lambda:backend.read_seven_brain_signal_sources(
             manifest_signals,bq,now=now))
         if found is not None:signals,signal_audit=found
+    # Reconcile the same issuer registry + optional independent proof inputs.
+    # This does not convert descriptive game grades into live-qualified rules.
+    proof=stage('frozen_rule_evidence_reconciliation',lambda:
+        _v55_live_qualification_evidence_reconcile(gcs,bucket,backend))
+    if proof is not None:
+        result['stages']['frozen_rule_evidence_reconciliation'].update(proof)
     # Run the EXISTING verified producer before capture retrieval. This is
     # prospective capture mode, not a Heavy Research job: only attested frozen
     # recipes may fire, and only actual new signals write immutable GCS records.
