@@ -315,6 +315,19 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
         found=stage('original_live_seven_brain_events',lambda:backend.read_seven_brain_signal_sources(
             manifest_signals,bq,now=now))
         if found is not None:signals,signal_audit=found
+    # Direct read of the existing producer's immutable live captures is
+    # permitted in a read-only audit. This never computes or publishes a new
+    # signal, and never converts historical replays into live records.
+    captured=stage('existing_prospective_live_captures',lambda:
+        backend.read_recent_v55_prospective_captures(gcs,bucket,now=now))
+    if captured is not None:
+        saved,saved_audit=captured
+        refs={str(x.get('signal_capture_ref')) for x in signals}
+        signals.extend(x for x in saved if str(x.get('signal_capture_ref')) not in refs)
+        result['stages']['existing_prospective_live_captures'].update(saved_audit)
+        if saved:
+            signal_audit={'status':'LIVE_CAPTURE_EVENTS_READ','accepted_events':len(signals),
+                          'from_immutable_prospective_captures':len(saved)}
     result['stages']['original_live_seven_brain_events']={**signal_audit,
         'live_manifest_configured':bool(manifest_signals), 'read_only_no_producer_execution':True}
     if board is not None and signals:
@@ -330,6 +343,13 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
     qrows=[]
     if board is not None:
         current=backend.row_quotes(board.to_dict('records'))
+        auto_other=stage('h2h_totals_current_scanner_quotes',lambda:
+            backend.read_current_other_market_quotes(bq,board.to_dict('records'),
+                now=now,horizon_days=horizon_days))
+        if auto_other is not None:
+            auto_rows,auto_diag=auto_other
+            current.extend(auto_rows)
+            result['stages']['h2h_totals_current_scanner_quotes'].update(auto_diag)
         if extra_quotes_uri:
             extra=stage('h2h_totals_quote_ingest',lambda:backend.read_rows(extra_quotes_uri))
             if extra is not None:current.extend(extra)

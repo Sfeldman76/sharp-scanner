@@ -1631,6 +1631,145 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
 
 
 
+def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
+                                         hours=24, max_objects=300):
+    """Read actual immutable prospective captures, never retrospective events.
+
+    A missing capture is missing evidence, not a synthetic no-fire. Only objects
+    from the existing live producer prefix and exact capture references qualify.
+    No GCS writes occur here.
+    """
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    if at is None:raise ValueError('INVALID_CAPTURE_READ_TIME')
+    from datetime import timedelta
+    prefix='research/ncaaf/v55/live/prospective_events/'
+    dates=sorted({(at-timedelta(days=i)).strftime('%Y%m%d') for i in range(2)})
+    files=[]
+    for day in dates:
+        files.extend(storage_client.list_blobs(bucket,prefix=prefix+day+'/'))
+    files=sorted((b for b in files if b.name.endswith('.jsonl')),
+                 key=lambda b:b.name,reverse=True)[:max_objects]
+    accepted=[];seen=set();holds=Counter();by_family=Counter()
+    for blob in files:
+        uri='gs://'+bucket+'/'+blob.name
+        try:payload=blob.download_as_text()
+        except Exception as exc:
+            holds['CAPTURE_DOWNLOAD_'+type(exc).__name__]+=1;continue
+        for line in payload.splitlines():
+            if not line.strip():continue
+            try:ev=json.loads(line)
+            except (ValueError,TypeError):holds['INVALID_CAPTURE_JSON']+=1;continue
+            if not isinstance(ev,dict):holds['INVALID_CAPTURE_ROW']+=1;continue
+            fam=family(ev.get('source_family'))
+            signal_time=clock(ev.get('signal_observed_at_utc'))
+            quote_time=clock(ev.get('quote_observed_at_utc'))
+            kickoff=clock(ev.get('kickoff_utc'))
+            capture=s(ev.get('signal_capture_ref'))
+            quote_ref=s(ev.get('quote_capture_ref'))
+            ident=s(ev.get('capture_id'))
+            if (fam not in BRAINS or not ident or capture!=uri+'#'+ident
+                or not quote_ref or not truth(ev.get('direction_verified'))
+                or not signal_time or not quote_time or not kickoff
+                or not quote_time<=signal_time<=at<kickoff
+                or (signal_time-quote_time).total_seconds()>900
+                or (at-signal_time).total_seconds()>hours*3600
+                or not s(ev.get('game_id')) or not s(ev.get('system_id'))):
+                holds['INVALID_OR_EXPIRED_ORIGINAL_CAPTURE']+=1;continue
+            if capture in seen:holds['DUPLICATE_CAPTURE_REF']+=1;continue
+            seen.add(capture);accepted.append(ev);by_family[fam]+=1
+    return accepted,{'status':'PASS' if accepted else 'NO_VALID_RECENT_PROSPECTIVE_EVENTS',
+        'scanned_objects':len(files),'accepted_events':len(accepted),
+        'by_family':dict(by_family),'rejected':dict(holds),
+        'source':'IMMUTABLE_V55_LIVE_PROSPECTIVE_CAPTURES',
+        'original_capture_only':True,'bet_authority':0}
+
+
+def read_current_other_market_quotes(bq_client, board_rows, *, now=None,
+                                     horizon_days=14, minutes=180):
+    """Read and pair real NCAAF H2H/totals from the existing scanner table.
+
+    Require exact normalized home and away and a compatible market kickoff.
+    Returns quote_normal-compatible rows with no assumed outcomes or prices.
+    """
+    from google.cloud import bigquery
+    from ncaaf_v55_board import _norm_team
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    if at is None:raise ValueError('INVALID_MARKET_READ_TIME')
+    table='sharplogger.sharp_data.sharp_moves_master'
+    fields={f.name for f in bq_client.get_table(table).schema}
+    need={'Sport','Market','Game_Start','Home_Team_Norm','Away_Team_Norm',
+          'Outcome','Value','Odds_Price','Bookmaker','Book','Snapshot_Timestamp'}
+    if not need.issubset(fields):raise ValueError('OTHER_MARKETS_SOURCE_SCHEMA_MISSING:'+str(sorted(need-fields)))
+    sql=f"""SELECT Market,Game_Start,Home_Team_Norm,Away_Team_Norm,Outcome,
+            Value,Odds_Price,Bookmaker,Book,Snapshot_Timestamp
+        FROM `{table}` WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
+        AND LOWER(TRIM(CAST(Market AS STRING))) IN ('h2h','moneyline','moneylines','totals','total')
+        AND Game_Start > @now AND Game_Start <= TIMESTAMP_ADD(@now, INTERVAL @horizon DAY)
+        AND Snapshot_Timestamp BETWEEN TIMESTAMP_SUB(@now, INTERVAL @minutes MINUTE) AND @now
+        AND Snapshot_Timestamp < Game_Start
+        AND SAFE_CAST(Odds_Price AS FLOAT64) IS NOT NULL"""
+    cfg=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter('now','TIMESTAMP',at),
+        bigquery.ScalarQueryParameter('horizon','INT64',int(horizon_days)),
+        bigquery.ScalarQueryParameter('minutes','INT64',int(minutes))])
+    raw=[dict(r.items()) for r in bq_client.query(sql,job_config=cfg).result()]
+    games={}
+    for r in board_rows:
+        gid=s(r.get('Game_ID') or r.get('game_id'))
+        home=_norm_team(r.get('Home_Team') or r.get('Home'))
+        away=_norm_team(r.get('Away_Team') or r.get('Away'))
+        kick=clock(r.get('Game_Start_UTC'))
+        if gid and home and away and home!=away and kick and kick>at:
+            games[(home,away, gid)]=kick
+    candidates=defaultdict(list);holds=Counter()
+    for r in raw:
+        home=_norm_team(r.get('Home_Team_Norm'));away=_norm_team(r.get('Away_Team_Norm'))
+        kick=clock(r.get('Game_Start'));stamp=clock(r.get('Snapshot_Timestamp'))
+        if not kick or not stamp or stamp>at or stamp>=kick:
+            holds['INVALID_MARKET_CAPTURE_TIME']+=1;continue
+        matches=[(gid,cfbd_kick) for (h,a,gid),cfbd_kick in games.items()
+                 if (h,a)==(home,away) and abs((kick-cfbd_kick).total_seconds())<=3600]
+        if len(matches)!=1:holds['NO_UNIQUE_CFBD_FIXTURE_MATCH']+=1;continue
+        gid,cfbd_kick=matches[0]
+        m=market(r.get('Market'))
+        if m in ('moneylines','money_line'):m='h2h'
+        if m not in ('h2h','totals'):holds['UNSUPPORTED_MARKET']+=1;continue
+        outcome=s(r.get('Outcome')).upper()
+        side=('HOME' if _norm_team(r.get('Outcome'))==home else
+              'AWAY' if _norm_team(r.get('Outcome'))==away else '') if m=='h2h' else (
+              'OVER' if outcome.startswith('OVER') else 'UNDER' if outcome.startswith('UNDER') else '')
+        book=s(r.get('Bookmaker') or r.get('Book')).lower()
+        odds=num(r.get('Odds_Price'))
+        ln=num(r.get('Value')) if m=='totals' else None
+        if (not side or not book or profit(odds) is None
+            or (m=='totals' and (ln is None or ln*2!=round(ln*2)))):
+            holds['INVALID_MARKET_SIDE_LINE_OR_ODDS']+=1;continue
+        line_key=ln if m=='totals' else None
+        candidates[(gid,m,book,line_key)].append({
+            'game_id':gid,'market':m,'side':side,'book':book,'line':ln,'odds':odds,
+            'kickoff_utc':cfbd_kick.isoformat(),
+            'quote_observed_at_utc':stamp.isoformat(),'_timestamp':stamp,
+            'paired_source_verified':True,
+            'quote_capture_ref':'bq://'+table+'#'+sha((gid,m,book,side,ln,stamp.isoformat(),odds))})
+    result=[]
+    for key,items in candidates.items():
+        best={}
+        for item in sorted(items,key=lambda x:x['_timestamp'],reverse=True):
+            best.setdefault(item['side'],item)
+        expected={'OVER','UNDER'} if key[1]=='totals' else {'HOME','AWAY'}
+        if set(best)!=expected:
+            holds['MISSING_OPPOSITE_SIDE']+=1;continue
+        a,b=(best[x] for x in sorted(expected))
+        if abs((a['_timestamp']-b['_timestamp']).total_seconds())>120:
+            holds['PAIR_SNAPSHOT_MISMATCH']+=1;continue
+        for item in (a,b):
+            item.pop('_timestamp');result.append(item)
+    return result,{'status':'PASS' if result else 'NO_VERIFIED_OTHER_MARKET_QUOTES',
+        'read_source_rows':len(raw),'paired_quote_rows':len(result),
+        'market_counts':dict(Counter(x['market'] for x in result)),
+        'holds':dict(holds),'bet_authority':0}
+
+
 def seven_brain_live_combination_audit(signals, *, max_examples=150):
     """Enumerate cross-family live evidence without approving it by count.
 
@@ -1820,6 +1959,19 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
         signals=[];source_hold='LIVE_DIRECTIONAL_SIGNAL_FEED_INVALID:'+type(exc).__name__+':'+str(exc)
     if not isinstance(signals,list):
         raise RuntimeError('INVALID_LIVE_SIGNAL_FEED_SCHEMA')
+    # Read existing immutable current-game captures without requiring a
+    # separate manually maintained source manifest. Old research replay is
+    # explicitly excluded. This is independent of CORE origination.
+    try:
+        saved,capture_read_audit=read_recent_v55_prospective_captures(gcs,bucket)
+        ids={s(x.get('signal_capture_ref')) for x in signals}
+        signals.extend(x for x in saved if s(x.get('signal_capture_ref')) not in ids)
+        if saved and source_hold=='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED':
+            source_hold=None
+    except Exception as exc:
+        capture_read_audit={'status':'HOLD_CAPTURE_READ_ERROR',
+                            'error':type(exc).__name__+':'+str(exc)[:180]}
+    seven_brain_input_audit['existing_prospective_capture_reader']=capture_read_audit
     # The existing frozen expert feature evaluators are now a producer of
     # prospectively captured original decisions. This runs in the SAME backend
     # scan and enters the SAME seven-brain evaluator; no additional service or
@@ -1980,6 +2132,13 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
                     raise ValueError('ML_SHADOW_ONLY_ARTIFACT_REQUIRED:'+name)
                 specs[name]=spec
             current_quotes=row_quotes(board.to_dict('records'))+(extra_quotes or [])
+            try:
+                extra_market,extra_market_audit=read_current_other_market_quotes(
+                    bq,board.to_dict('records'),horizon_days=14)
+                current_quotes.extend(extra_market)
+                log('[NCAAF-V55-H2H-TOTAL-QUOTE-SOURCE] '+json.dumps(extra_market_audit,sort_keys=True))
+            except Exception as exc:
+                log('[NCAAF-V55-H2H-TOTAL-QUOTE-HOLD] '+type(exc).__name__+':'+str(exc)[:240])
             shadow_quote_clock=datetime.now(timezone.utc)
             valid_quotes=[q for raw in current_quotes if (q:=quote_normal(raw,shadow_quote_clock,age_limit=180))]
             # quote_normal dates are objects; score_snapshot receives text.
@@ -2262,30 +2421,50 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                 nright=len({ident for (game,market,side,family,ident) in directional_counts
                             if (game,market,side,family)==(gid,mkt,right,fam)})
                 prefix='EVIDENCE_'+mkt+'_'+fam
-                raw[prefix+'_NET']=float(min(3,nleft)-min(3,nright))
+                raw[prefix+'_NET']=(float(min(3,nleft)-min(3,nright))
+                                    if nleft+nright else float('nan'))
                 # Exact parity with the full-history frozen-brain representation.
                 # Zero recorded events is UNKNOWN source coverage, not a
                 # source-certified NO_FIRE. The stacked research model uses
                 # explicit NaN for direction when nothing was recorded.
-                raw[prefix+'_RECORDED_FIRE']=float(bool(nleft+nright))
+                raw[prefix+'_RECORDED_FIRE']=(1.0 if nleft+nright else float('nan'))
                 raw[prefix+'_OPPOSING_FIRE']=float(bool(nleft and nright)) if nleft+nright else float('nan')
                 raw[prefix+'_LOG_FIRE_IMBALANCE']=(float(math.log1p(nleft)-math.log1p(nright))
                                                     if nleft+nright else float('nan'))
                 raw[prefix+'_LOG_FIRE_VOLUME']=(float(math.log1p(nleft+nright))
                                                  if nleft+nright else float('nan'))
             nets=[raw['EVIDENCE_'+mkt+'_'+fam+'_NET'] for fam in _V55_FH_FAMILIES]
-            raw['CONFLUENCE_'+mkt+'_SUPPORT_HOME']=float(sum(v>0 for v in nets))
-            raw['CONFLUENCE_'+mkt+'_SUPPORT_AWAY']=float(sum(v<0 for v in nets))
-            raw['CONFLUENCE_'+mkt+'_CONFLICT']=float(any(v>0 for v in nets) and any(v<0 for v in nets))
-            raw['CONFLUENCE_'+mkt+'_INDEPENDENT_FAMILIES']=float(sum(v!=0 for v in nets))
-        raw['MARKET_RICH_HIST_PRESENT']=float(any(
+            known=[v for v in nets if math.isfinite(v)]
+            for field,value in (('SUPPORT_HOME',sum(v>0 for v in known)),
+                                ('SUPPORT_AWAY',sum(v<0 for v in known)),
+                                ('CONFLICT',int(any(v>0 for v in known) and any(v<0 for v in known))),
+                                ('INDEPENDENT_FAMILIES',sum(v!=0 for v in known))):
+                raw['CONFLUENCE_'+mkt+'_'+field]=(float(value) if known else float('nan'))
+        raw['MARKET_RICH_HIST_PRESENT']=(1.0 if any(
             k in raw and math.isfinite(_v55_fh_finite(raw[k]))
-            for k in ('MARKET_SPREAD_LATEST','MARKET_TOTAL_LATEST','MARKET_H2H_HOME_PRICE')))
+            for k in ('MARKET_SPREAD_LATEST','MARKET_TOTAL_LATEST','MARKET_H2H_HOME_PRICE'))
+            else float('nan'))
         for col in ('MARKET_SPREAD_OPEN','MARKET_SPREAD_LATEST','MARKET_SPREAD_MOVE',
                     'MARKET_TOTAL_OPEN','MARKET_TOTAL_LATEST','MARKET_TOTAL_MOVE',
                     'MARKET_H2H_HOME_PRICE','MARKET_SPREAD_BOOKS',
                     'MARKET_TOTAL_BOOKS','MARKET_SNAPSHOT_COUNT'):
             raw.setdefault(col,float('nan'))
+        # The historical combined schema includes named expert-context and
+        # Market Rich feature columns that the forward CFBD source does not
+        # contain. Explicitly represent unavailable input as NaN, NOT a 0
+        # (which would falsely claim a verified no-fire). Never invent signals.
+        # Model inference can run in shadow and disclose missing evidence.
+        missing_context=set()
+        for model_name in ('FULL_COMBINED_margin','FULL_COMBINED_total'):
+            spec=models.get(model_name)
+            if spec:
+                for field in spec.get('features',[]):
+                    if field not in raw:
+                        if field.startswith('CFBD_DIFF_'):
+                            holds['MISSING_REQUIRED_CFBD_PRIOR_FIELD']+=1
+                        else:
+                            raw[field]=float('nan');missing_context.add(field)
+        if missing_context:holds['SHADOW_UNKNOWN_EXPERT_CONTEXT_COLUMNS']+=len(missing_context)
         target=str(q.get('market') or '')
         if target not in ('spreads','h2h','totals'):continue
         model_target='total' if target=='totals' else 'margin'
@@ -2430,6 +2609,8 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                             'stacked_model_sha256':(manifest.get('artifacts') or {}).get('FULL_STACKED_margin',{}).get('sha256') if target=='spreads' else None,
                             'stacked_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_STACKED_margin',{}).get('features',[])) if target=='spreads' else None,
                             'combined_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('features',[])),
+                            'missing_context_feature_count':len(missing_context),
+                            'evidence_capture_complete':bool(signal_counts.get(gid)),
                             'feature_original_capture_certified':r.get('original_feature_capture_verified') is True,
                             'brain_signal_families':sorted(signal_counts.get(gid,set())),
                             'status':'SHADOW_NOT_AUTHORIZED','bet_authority':0})
