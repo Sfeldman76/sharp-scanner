@@ -1537,6 +1537,87 @@ def produce_v55_full_history_miner(board, feature_rows, qualified_registry, *,
         audit.update(status='HOLD_MINER_CAPTURE_WRITE_FAILED',error=type(exc).__name__+':'+str(exc)[:160])
         return [],audit
 
+# Read existing qualification publications, including versioned archived registries.
+# Discovery is not qualification: only records accepted by the unchanged strict
+# validate_v55_current_qualification() contract can execute prospective rules.
+def discover_v55_qualified_registry(storage_client, bucket, *, now=None):
+    import re
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    default='research/ncaaf/v55/qualified_independent_brains_v55_current.json'
+    configured=s(os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY')) or default
+    if configured.startswith('gs://'):
+        match=re.fullmatch(r'gs://([^/]+)/(.+)',configured)
+        if not match or match.group(1)!=bucket:
+            return None,{'status':'HOLD_BAD_EXPLICIT_QUALIFICATION_URI','configured':configured}
+        configured=match.group(2)
+    explicit=[configured]
+    extra=s(os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_CANDIDATES'))
+    for path in extra.split(',') if extra else ():
+        path=path.strip()
+        if path.startswith('gs://'):
+            match=re.fullmatch(r'gs://([^/]+)/(.+)',path)
+            if not match or match.group(1)!=bucket:continue
+            path=match.group(2)
+        if path and path not in explicit:explicit.append(path)
+    # Deliberately narrow listings, not a bucket-wide search or legacy V2 fallback.
+    prefixes=('research/ncaaf/v55/qualified_independent_brains',
+              'research/ncaaf/v55/qualification_evidence/',
+              'research/ncaaf/v55/qualification_registry/')
+    keys=list(explicit)
+    listing_issues=[]
+    for prefix in prefixes:
+        try:
+            count=0
+            for obj in storage_client.list_blobs(bucket,prefix=prefix,max_results=250):
+                key=s(getattr(obj,'name',''))
+                if not key.endswith('.json') or key in keys:continue
+                # Never mistake historical candidate diagnostics for an approved
+                # producer contract; still inspect them for precise reporting.
+                if not ('qualif' in key or 'registry' in key or 'attest' in key):continue
+                keys.append(key)
+                count+=1
+                if count>=250:break
+        except Exception as exc:
+            listing_issues.append(prefix+':'+type(exc).__name__)
+    inspected=[]; eligible=[]
+    for key in keys[:754]:
+        try:
+            raw=storage_client.bucket(bucket).blob(key).download_as_bytes()
+            doc=json.loads(raw)
+            if not isinstance(doc,dict):continue
+            if doc.get('schema')!=V55_QUALIFICATION_SCHEMA:continue
+            verified,hold=validate_v55_current_qualification(
+                doc,raw_sha=hashlib.sha256(raw).hexdigest(),now=at)
+            n=len((verified or {}).get('rules') or {})
+            item={'uri':'gs://'+bucket+'/'+key,'status':s(doc.get('status')),
+                'candidate_count':int(doc.get('candidate_system_count') or 0),
+                'published_system_count':len(doc.get('systems') or []),
+                'accepted_executable_rules':n,'hold':hold or '',
+                'validation_contract':s(doc.get('validation_contract'))}
+            inspected.append(item)
+            if verified and n:
+                created=clock(doc.get('created_utc'))
+                eligible.append((created or datetime.min.replace(tzinfo=timezone.utc),n,key,verified,item))
+        except Exception as exc:
+            inspected.append({'uri':'gs://'+bucket+'/'+key,
+                              'read_error':type(exc).__name__})
+    audit={'status':'HOLD_NO_APPROVED_EXECUTABLE_REGISTRY',
+           'configured_uri':'gs://'+bucket+'/'+configured,
+           'registries_examined':inspected[:40],
+           'registry_count':len(inspected),
+           'listing_issues':listing_issues,
+           'historical_candidates_not_promoted':True}
+    if not eligible:
+        audit['reason']='Existing publications contain no approved executable rules satisfying the live contract'
+        return None,audit
+    eligible.sort(key=lambda item:(item[0],item[1],item[2]),reverse=True)
+    _,_,key,verified,item=eligible[0]
+    audit.update(status='PASS_EXISTING_APPROVED_REGISTRY_FOUND',
+                 selected_uri=item['uri'],qualified_rule_count=len(verified['rules']),
+                 selected_contract=item['validation_contract'])
+    return verified,audit
+
+
 def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
                                          bucket, now=None, log_func=None):
     """Current genuine frozen-rule producer. Never executes old Miner/V1 authority."""
@@ -1554,25 +1635,12 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
     # Read the CURRENT V5.5 qualification output, not the October 27
     # ncaaf-research-v2.33.0 placeholder. A HOLD is a legitimate research
     # outcome and may not be relabeled as FROZEN_OOS_QUALIFIED.
-    qualification_key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
-        'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
-    frozen=None;problem=None
-    try:
-        raw=storage_client.bucket(bucket).blob(qualification_key).download_as_bytes()
-        document=json.loads(raw)
-        audit['qualification_registry_uri']='gs://'+bucket+'/'+qualification_key
-        audit['qualification_registry_status']=s(document.get('status'))
-        audit['qualification_candidates']=int(document.get('candidate_system_count') or 0)
-        audit['qualification_systems']=len(document.get('systems') or [])
-        audit['historical_screen_pass_systems_count']=len(document.get('historical_screen_pass_systems') or [])
-        audit['historical_research_not_live_approved']=True
-        audit['qualification_hold_counts']=document.get('hold_counts') or {}
-        frozen,problem=validate_v55_current_qualification(
-            document,raw_sha=hashlib.sha256(raw).hexdigest())
-        if not frozen:
-            problem=s(document.get('status'))+':'+s(problem)
-    except Exception as exc:
-        problem='V55_QUALIFICATION_REGISTRY_UNAVAILABLE:'+type(exc).__name__
+    frozen,lookup_audit=discover_v55_qualified_registry(storage_client,bucket,now=at)
+    audit['qualification_lookup']=lookup_audit
+    problem=None if frozen else lookup_audit.get('status')
+    audit['qualification_registry_uri']=lookup_audit.get('selected_uri') or lookup_audit.get('configured_uri')
+    audit['qualification_systems']=lookup_audit.get('qualified_rule_count',0)
+    audit['historical_research_not_live_approved']=not bool(frozen)
 
     if problem or not frozen or not frozen.get('rules'):
         audit.update(status='HOLD_NO_FROZEN_EXPERT_LIVE_RULE_REGISTRY',reason=str(problem or 'NO_FROZEN_RULES'))
@@ -1666,23 +1734,13 @@ def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
     except Exception as exc:
         audit['expert_producer']={'status':'HOLD_PRODUCER_EXCEPTION',
            'error':type(exc).__name__+':'+str(exc)[:250]}
-    key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
-        'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
-    qualified=None
-    try:
-        raw=storage_client.bucket(bucket).blob(key).download_as_bytes()
-        doc=json.loads(raw)
-        qualified,hold=validate_v55_current_qualification(
-            doc,raw_sha=hashlib.sha256(raw).hexdigest(),now=at)
-        audit['rule_registry']={'status':s(doc.get('status')),
-            'operator_approved':doc.get('operator_approved') is True,
-            'candidate_system_count':int(doc.get('candidate_system_count') or 0),
-            'historical_screen_pass_systems_count':len(doc.get('historical_screen_pass_systems') or []),
-            'hold_counts':doc.get('hold_counts') or {},
-            'validation_hold':hold,'qualified_rule_count':len((qualified or {}).get('rules') or {})}
-    except Exception as exc:
-        audit['rule_registry']={'status':'HOLD_REGISTRY_UNAVAILABLE',
-            'error':type(exc).__name__+':'+str(exc)[:250]}
+    qualified,lookup_audit=discover_v55_qualified_registry(storage_client,bucket,now=at)
+    audit['rule_registry']={'status':lookup_audit.get('status'),
+        'selected_uri':lookup_audit.get('selected_uri'),
+        'configured_uri':lookup_audit.get('configured_uri'),
+        'qualified_rule_count':len((qualified or {}).get('rules') or {}),
+        'validation_hold':None if qualified else lookup_audit.get('reason') or lookup_audit.get('status'),
+        'lookup':lookup_audit}
     if qualified is not None:
         try:
             miner,miner_audit=produce_v55_full_history_miner(
@@ -2128,11 +2186,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
             # Only explicit qualified Miner prior-field recipes extend the
             # existing forward CFBD read. No guessing from atom names.
             try:
-                qkey=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
-                    'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
-                qraw=gcs.bucket(bucket).blob(qkey).download_as_bytes()
-                qreg,qproblem=validate_v55_current_qualification(
-                    json.loads(qraw),raw_sha=hashlib.sha256(qraw).hexdigest())
+                qreg,q_lookup=discover_v55_qualified_registry(gcs,bucket)
                 if qreg:
                     for (fam,_),rule in qreg['rules'].items():
                         if fam!='SYSTEM_MINER':continue
@@ -2158,15 +2212,8 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     log('[NCAAF-V55-FULL-HISTORY-FEATURE-AUDIT] '+json.dumps(feature_audit,sort_keys=True))
     # Full-history Miner V5 evaluates side-specific, audited pregame feature
     # records; no V2 votes and no retrospective replay promoted to live.
-    miner_registry=None;miner_registry_hold='NOT_CONFIGURED'
-    try:
-        qualification_key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
-            'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
-        qraw=gcs.bucket(bucket).blob(qualification_key).download_as_bytes()
-        miner_registry,miner_registry_hold=validate_v55_current_qualification(
-            json.loads(qraw),raw_sha=hashlib.sha256(qraw).hexdigest())
-    except Exception as exc:
-        miner_registry_hold='V55_MINER_REGISTRY_READ_FAILED:'+type(exc).__name__
+    miner_registry,miner_lookup=discover_v55_qualified_registry(gcs,bucket)
+    miner_registry_hold=None if miner_registry else miner_lookup.get('reason') or miner_lookup.get('status')
     miner_audit={'status':'HOLD_QUALIFICATION_REGISTRY', 'reason':miner_registry_hold,
                  'captured':0}
     if miner_registry is not None:
