@@ -200,6 +200,43 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
+    # Dedicated read-only V5.5 model-to-live-market audit, executed by the
+    # existing Cloud Run Job image. No Heavy Research, training or bet publication.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_live_audit":
+        import json as _json
+        from datetime import datetime, timezone
+        import v55_model_live_market_audit as _audit
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        result_key = "research/ncaaf/v55/live_scoring_audit/runs/" + stamp + "/audit.json"
+        local_path = "/tmp/v55_live_scoring_audit_" + stamp + ".json"
+        try:
+            result = _audit.run(
+                out=local_path,
+                manifest_uri=os.getenv("NCAAF_V55_ML_MANIFEST_URI",
+                    "gs://sharp-models/research/ncaaf/v55/ml/current_manifest.json"),
+                bucket=bucket,
+                horizon_days=int(os.getenv("NCAAF_V55_LIVE_AUDIT_HORIZON_DAYS", "14")),
+                max_games=int(os.getenv("NCAAF_V55_LIVE_AUDIT_MAX_GAMES", "0")),
+                live_manifest_uri=os.getenv("NCAAF_V55_SEVEN_BRAIN_MANIFEST_URI", ""),
+                extra_quotes_uri=os.getenv("NCAAF_V55_OTHER_MARKET_QUOTES_URI", ""),
+            )
+        except Exception as exc:
+            result = {"status": "AUDIT_CRASH", "bet_authority": 0,
+                "error": type(exc).__name__ + ":" + str(exc)[:400]}
+        result_blob = gcs.bucket(bucket).blob(result_key)
+        result_blob.upload_from_string(_json.dumps(result, indent=2, sort_keys=True,
+            default=str, allow_nan=False), content_type="application/json", if_generation_match=0)
+        # Summary is a single-line log entry; immutable per-run result is in GCS.
+        log_func("[NCAAF-V55-MODEL-TO-LIVE-AUDIT] " + _json.dumps({
+            "status": result.get("status"), "result_uri": "gs://" + bucket + "/" + result_key,
+            "stage_status": {k: v.get("status") for k, v in result.get("stages", {}).items()},
+            "scored_games": result.get("scoring", {}).get("scored_games", 0),
+            "scored_market_sides": result.get("scoring", {}).get("scored_market_sides", 0),
+            "bet_authority": 0}, sort_keys=True))
+        if not str(result.get("status", "")).startswith("PASS"):
+            raise RuntimeError("NCAAF_V55_LIVE_AUDIT_HOLD__SEE_" + "gs://" + bucket + "/" + result_key)
+        return
+
     # NCAAF_V55_TWO_AUTHORITY_CUTOVER_20261106:
     # One research engine for all manual NCAAF heavy/research menu entry points.
     # Do not run historical V2 / Stage2 validation as a parallel betting authority.
