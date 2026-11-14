@@ -210,8 +210,11 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
     now=datetime.now(timezone.utc)
     bq=bigquery.Client(project='sharplogger')
     gcs=storage.Client(project='sharplogger')
-    result={'schema':'NCAAF_V55_MODEL_TO_LIVE_MARKET_INTEGRITY_AUDIT_V1',
-            'created_at_utc':now.isoformat(), 'scope':'READ_ONLY_CURRENT_FORWARD_SHADOW',
+    capture_producer=os.getenv('NCAAF_V55_LIVE_AUDIT_PRODUCER_ENABLED','1').strip().lower() not in ('0','false','off','no')
+    result={'schema':'NCAAF_V55_MODEL_TO_LIVE_MARKET_INTEGRITY_AUDIT_V2',
+            'created_at_utc':now.isoformat(),
+            'scope':('PROSPECTIVE_ORIGINAL_CAPTURE_WRITE_AND_SHADOW_SCORE' if capture_producer
+                     else 'READ_ONLY_CURRENT_FORWARD_SHADOW'),
             'authority_changed':False, 'bet_authority':0,
             'models':{},'stages':{},'holds':{},'by_market':{},'by_brain':{},
             'scoring':{},'status':'INCOMPLETE'}
@@ -315,9 +318,26 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
         found=stage('original_live_seven_brain_events',lambda:backend.read_seven_brain_signal_sources(
             manifest_signals,bq,now=now))
         if found is not None:signals,signal_audit=found
-    # Direct read of the existing producer's immutable live captures is
-    # permitted in a read-only audit. This never computes or publishes a new
-    # signal, and never converts historical replays into live records.
+    # Run the EXISTING verified producer before capture retrieval. This is
+    # prospective capture mode, not a Heavy Research job: only attested frozen
+    # recipes may fire, and only actual new signals write immutable GCS records.
+    # The operator can restore read-only behavior with
+    # NCAAF_V55_LIVE_AUDIT_PRODUCER_ENABLED=0.
+    if capture_producer and board is not None and quote_frame is not None:
+        producer=stage('prospective_live_brain_producer', lambda:
+            backend.run_v55_prospective_producer_pass(board,quote_frame,inputs,
+                storage_client=gcs,bucket=bucket,now=datetime.now(timezone.utc)))
+        if producer is not None:
+            produced,producer_audit=producer
+            result['stages']['prospective_live_brain_producer'].update(producer_audit)
+            result['stages']['prospective_live_brain_producer']['new_capture_refs']=[
+                str(e.get('signal_capture_ref')) for e in produced[:12]]
+    elif not capture_producer:
+        result['stages']['prospective_live_brain_producer']={'status':'DISABLED_READ_ONLY_MODE'}
+    else:
+        result['stages']['prospective_live_brain_producer']={
+            'status':'NOT_RUN_MISSING_BOARD_OR_QUOTES'}
+    # Read only genuine existing prospectively captured original decisions.
     captured=stage('existing_prospective_live_captures',lambda:
         backend.read_recent_v55_prospective_captures(gcs,bucket,now=now))
     if captured is not None:
@@ -329,13 +349,21 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
             signal_audit={'status':'LIVE_CAPTURE_EVENTS_READ','accepted_events':len(signals),
                           'from_immutable_prospective_captures':len(saved)}
     result['stages']['original_live_seven_brain_events']={**signal_audit,
-        'live_manifest_configured':bool(manifest_signals), 'read_only_no_producer_execution':True}
+        'live_manifest_configured':bool(manifest_signals),
+        'read_only_no_producer_execution':not capture_producer}
     if board is not None and signals:
         canonical=stage('live_signal_canonical_game_join',lambda:backend.canonicalize_live_signal_game_ids(signals,board))
         if canonical is not None:
             signals,canonical_audit=canonical
             result['stages']['live_signal_canonical_game_join'].update(canonical_audit)
     event_count=_v55_audit_Counter(backend.family(x.get('source_family') or x.get('Source_Family')) for x in signals)
+    result['live_signal_reconciliation']={
+       'distinct_capture_refs':len({str(x.get('signal_capture_ref') or x.get('source_capture_ref')) for x in signals}),
+       'distinct_systems':len({(backend.family(x.get('source_family')),str(x.get('system_id'))) for x in signals}),
+       'events_by_family_market':dict(sorted(_v55_audit_Counter(
+            backend.family(x.get('source_family'))+':'+backend.market(x.get('market'))
+            for x in signals).items())),
+       'duplicate_capture_refs':len(signals)-len({str(x.get('signal_capture_ref') or x.get('source_capture_ref')) for x in signals})}
     for fam in _V55_LIVE_AUDIT_FAMILIES:result['by_brain'][fam]={'accepted_current_original_directional_events':event_count[fam],
         'event_source_state':'PRESENT' if event_count[fam] else 'NO_ACCEPTED_ORIGINAL_LIVE_EVENTS',
         'does_not_require_core_origination':True}
@@ -374,6 +402,12 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
                 'stack_model_scored':sum('STACKED' in x.get('models',{}) for x in rr),
                 'expert_first_without_core_value':sum(x.get('expert_first_without_core_value') is True for x in rr)}
                 for market in ('spreads','h2h','totals') for rr in [[r for r in rows if r.get('market')==market]]}
+            result['live_market_rich_reconciliation']={
+                'scored_side_rows_with_verified_price_features':sum(bool(r.get('verified_live_market_rich_fields')) for r in rows),
+                'verified_feature_row_counts':dict(_v55_audit_Counter(
+                    field for r in rows for field in r.get('verified_live_market_rich_fields',[]))),
+                'opening_and_movement_from_unverified_quotes_synthesized':False,
+                'market_context_is_not_independent_directional_vote':True}
             by_fam=_v55_audit_Counter(fam for row in rows for fam in row.get('brain_signal_families',[]))
             for fam in _V55_LIVE_AUDIT_FAMILIES:result['by_brain'][fam]['scored_market_sides_with_signal']=by_fam[fam]
             # Keep compact operational rows; do not leak entire model feature vectors.
@@ -397,12 +431,15 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
         'paired_current_market_quotes_available':bool(qrows) and result['stages'].get('market_quote_normalization',{}).get('paired_rows',0)>0,
         'seven_brain_original_event_manifest_configured':bool(manifest_signals),
         'original_event_handoff_present':bool(signals),
+        'prospective_producer_invoked':result['stages'].get('prospective_live_brain_producer',{}).get('producer_executed') is True,
+        'original_capture_handoff_missing':not bool(signals),
         'backend_scoring_produced_rows':result['scoring'].get('scored_market_sides',0)>0,
         'bet_authority_remained_zero':True}
     result['errors']=errors
     if errors:result['status']='HOLD_AUDIT_STAGE_FAILURE'
     elif result['acceptance_checks']['backend_scoring_produced_rows']:
-        result['status']='PASS_SHADOW_SCORING__CHECK_REPORTED_INPUT_HOLDS'
+        result['status']=('PASS_SCORING_AND_ORIGINAL_EVENT_HANDOFF' if signals else
+                          'PASS_SHADOW_SCORING__HOLD_ORIGINAL_EVENT_PRODUCER')
     else:result['status']='HOLD_NO_COMPLETE_LIVE_SCORING_CHAIN'
     Path(out).parent.mkdir(parents=True,exist_ok=True)
     Path(out).write_text(json.dumps(result,indent=2,sort_keys=True,default=str,allow_nan=False)+'\n')

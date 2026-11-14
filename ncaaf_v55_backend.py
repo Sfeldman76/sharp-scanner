@@ -1631,6 +1631,77 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
 
 
 
+
+def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
+                                      storage_client, bucket, now=None, log_func=None):
+    """Evaluate ONLY currently attested frozen live rules; persist genuine firings.
+
+    Called by the existing train-job integration audit. A missing/held registry
+    is an explicit hold, never permission to promote retrospective candidates.
+    Writes only immutable prospective event captures if a genuine rule fires.
+    The scoring/authority functions and ROI certificates are not modified.
+    """
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    audit={'status':'HOLD_NO_PROSPECTIVE_EVENTS','bet_authority':0,
+           'original_events_persisted':0,'producer_executed':True,
+           'historical_replay_promoted':False,'by_family':{}}
+    events=[]
+    try:
+        produced,expert_audit=produce_v55_verified_expert_signals(
+            board,book_quotes,storage_client=storage_client,bucket=bucket,
+            now=at,log_func=log_func)
+        events.extend(produced)
+        audit['expert_producer']=expert_audit
+    except Exception as exc:
+        audit['expert_producer']={'status':'HOLD_PRODUCER_EXCEPTION',
+           'error':type(exc).__name__+':'+str(exc)[:250]}
+    key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
+        'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
+    qualified=None
+    try:
+        raw=storage_client.bucket(bucket).blob(key).download_as_bytes()
+        doc=json.loads(raw)
+        qualified,hold=validate_v55_current_qualification(
+            doc,raw_sha=hashlib.sha256(raw).hexdigest(),now=at)
+        audit['rule_registry']={'status':s(doc.get('status')),
+            'operator_approved':doc.get('operator_approved') is True,
+            'candidate_system_count':int(doc.get('candidate_system_count') or 0),
+            'hold_counts':doc.get('hold_counts') or {},
+            'validation_hold':hold,'qualified_rule_count':len((qualified or {}).get('rules') or {})}
+    except Exception as exc:
+        audit['rule_registry']={'status':'HOLD_REGISTRY_UNAVAILABLE',
+            'error':type(exc).__name__+':'+str(exc)[:250]}
+    if qualified is not None:
+        try:
+            miner,miner_audit=produce_v55_full_history_miner(
+                board,feature_rows,qualified,storage_client=storage_client,
+                bucket=bucket,now=at)
+            events.extend(miner)
+            audit['miner_producer']=miner_audit
+        except Exception as exc:
+            audit['miner_producer']={'status':'HOLD_MINER_PRODUCER_EXCEPTION',
+                'error':type(exc).__name__+':'+str(exc)[:250]}
+    else:
+        audit['miner_producer']={'status':'HOLD_NO_ATTESTED_V5_FROZEN_RULES'}
+    # Distinct capture references are mandatory. Never count a duplicated
+    # system firing from two readers as another independent vote.
+    refs=set();unique=[]
+    for e in events:
+        ref=s(e.get('signal_capture_ref'))
+        if not ref or ref in refs:
+            raise RuntimeError('PRODUCER_RETURNED_MISSING_OR_DUPLICATE_CAPTURE_REF')
+        refs.add(ref);unique.append(e)
+    audit['original_events_persisted']=len(unique)
+    audit['by_family']=dict(Counter(family(e.get('source_family')) for e in unique))
+    if unique:audit['status']='PASS_ORIGINAL_PROSPECTIVE_CAPTURES_PERSISTED'
+    elif audit.get('rule_registry',{}).get('validation_hold'):
+        audit['status']='HOLD_FROZEN_RULE_ATTESTATION_REQUIRED'
+    elif audit['expert_producer'].get('status','').startswith('HOLD'):
+        audit['status']='HOLD_EXPERT_PRODUCER'
+    else:audit['status']='NO_CURRENT_VERIFIABLE_RULE_FIRINGS'
+    return unique,audit
+
+
 def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
                                          hours=24, max_objects=300):
     """Read actual immutable prospective captures, never retrospective events.
@@ -2356,6 +2427,53 @@ def v55_validate_shadow_quote_pairs(quotes):
     return approved,holds
 
 
+
+def v55_live_market_rich_quote_features(paired_quotes, *, now=None):
+    """Current bookmaker-observed features, preserving training orientation.
+
+    Quotes are prevalidated two-sided same-book pairs. Use per-book HOME
+    spreads and OVER totals (the exact historical model orientations).
+    Distinct book snapshots are not opening captures; do NOT infer movements.
+    Data is research shadow only and never creates a directional vote.
+    """
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    grouped=defaultdict(lambda:defaultdict(dict))
+    for q in paired_quotes:
+        gid=s(q.get('game_id'));mk=market(q.get('market'))
+        book=s(q.get('book')).lower();side=s(q.get('side')).upper()
+        observed=clock(q.get('quote_observed_at_utc'))
+        kickoff=clock(q.get('kickoff_utc'))
+        if (not gid or not book or mk not in ('spreads','h2h','totals')
+            or observed is None or kickoff is None
+            or observed>at or at>=kickoff):continue
+        value=num(q.get('line')) if mk!='h2h' else num(q.get('odds'))
+        if value is None:continue
+        if mk=='spreads' and side!='HOME':continue
+        if mk=='totals' and side!='OVER':continue
+        if mk=='h2h' and side!='HOME':continue
+        key=(mk,book)
+        prev=grouped[gid][mk].get(book)
+        if prev is None or observed>prev[0]:
+            grouped[gid][mk][book]=(observed,value)
+    by_game={}
+    for gid,markets in grouped.items():
+        features={}
+        for mk,latest,books in (
+            ('spreads','MARKET_SPREAD_LATEST','MARKET_SPREAD_BOOKS'),
+            ('totals','MARKET_TOTAL_LATEST','MARKET_TOTAL_BOOKS')):
+            values=[entry[1] for entry in markets.get(mk,{}).values()]
+            if values:
+                features[latest]=float(sum(values)/len(values))
+                features[books]=float(len(values))
+        # Historical H2H Value encoding is not independently verified
+        # equivalent to current American odds. Leave that feature unknown.
+        # Count actual verified HOME/OVER observations, not virtual open rows.
+        count=sum(len(book_map) for book_map in markets.values())
+        if count:features['MARKET_SNAPSHOT_COUNT']=float(count)
+        by_game[gid]=features
+    return by_game
+
+
 def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     """Score audited forward feature snapshots and actual fresh paired quotes.
 
@@ -2369,6 +2487,7 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     # The input may contain one quote claiming paired_source_verified without
     # its other side. Accept only genuinely same-book paired line/odds rows.
     quotes,quote_holds=v55_validate_shadow_quote_pairs(quotes)
+    current_market_by_game=v55_live_market_rich_quote_features(quotes,now=now)
     signal_counts=defaultdict(set)
     directional_counts=Counter()
     # Exact accepted event kickoff by game. Do not attribute stale, fabricated
@@ -2385,11 +2504,17 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
             signal_holds['NO_VERIFIABLE_CURRENT_PREGAME_EXPERT_CAPTURE']+=1;continue
         if not truth(ev.get('direction_verified')):
             signal_holds['EXPERT_DIRECTION_NOT_VERIFIED']+=1;continue
+        # Original captures must have provenance. A source adapter may use
+        # 'source_capture_ref', while the immutable GCS writer uses
+        # 'signal_capture_ref'. A bare direction_verified flag is insufficient.
+        if not (s(ev.get('signal_capture_ref')) or s(ev.get('source_capture_ref'))):
+            signal_holds['EXPERT_ORIGINAL_CAPTURE_PROVENANCE_MISSING']+=1;continue
         if fam in ('CORE','STAT','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH'):
             signal_counts[key].add(fam)
         mkt=market(ev.get('market') or ev.get('Market'))
         side=str(ev.get('side') or ev.get('Side') or '').upper()
-        if key and fam in _V55_FH_FAMILIES and mkt in ('spreads','h2h','totals') and side in ('HOME','AWAY','OVER','UNDER'):
+        if (key and fam in _V55_FH_FAMILIES and mkt in ('spreads','h2h','totals')
+                and side in (('OVER','UNDER') if mkt=='totals' else ('HOME','AWAY'))):
             # A duplicated system-id must not count twice as independent support.
             ident=str(ev.get('system_id') or ev.get('System_ID') or '').strip()
             if not ident:
@@ -2440,9 +2565,16 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                                 ('CONFLICT',int(any(v>0 for v in known) and any(v<0 for v in known))),
                                 ('INDEPENDENT_FAMILIES',sum(v!=0 for v in known))):
                 raw['CONFLUENCE_'+mkt+'_'+field]=(float(value) if known else float('nan'))
+        # Market Rich: populate only verifiable AS-OF pregame quotes using
+        # historical HOME/OVER feature orientation and bookmaker means.
+        # Opening/movement remain unknown when no same-book opener exists.
+        # This is numeric market context, not a manufactured brain firing.
+        live_market=current_market_by_game.get(gid,{})
+        for field,value in live_market.items():
+            raw[field]=value
         raw['MARKET_RICH_HIST_PRESENT']=(1.0 if any(
-            k in raw and math.isfinite(_v55_fh_finite(raw[k]))
-            for k in ('MARKET_SPREAD_LATEST','MARKET_TOTAL_LATEST','MARKET_H2H_HOME_PRICE'))
+            math.isfinite(_v55_fh_finite(raw.get(k)))
+            for k in ('MARKET_SPREAD_LATEST','MARKET_TOTAL_LATEST'))
             else float('nan'))
         for col in ('MARKET_SPREAD_OPEN','MARKET_SPREAD_LATEST','MARKET_SPREAD_MOVE',
                     'MARKET_TOTAL_OPEN','MARKET_TOTAL_LATEST','MARKET_TOTAL_MOVE',
@@ -2610,6 +2742,8 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                             'stacked_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_STACKED_margin',{}).get('features',[])) if target=='spreads' else None,
                             'combined_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('features',[])),
                             'missing_context_feature_count':len(missing_context),
+                            'verified_live_market_rich_fields':sorted(k for k,v in live_market.items()
+                                if math.isfinite(_v55_fh_finite(v))),
                             'evidence_capture_complete':bool(signal_counts.get(gid)),
                             'feature_original_capture_certified':r.get('original_feature_capture_verified') is True,
                             'brain_signal_families':sorted(signal_counts.get(gid,set())),
