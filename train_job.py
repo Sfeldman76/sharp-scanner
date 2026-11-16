@@ -355,7 +355,11 @@ def _v55_live_audit_latest_spread_quotes(bq, table, *, now, horizon_days):
     return bq.query(query, job_config=config).to_dataframe(create_bqstorage_client=False)
 
 
-def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games=0,
+_V55_LIVE_AUDIT_MAX_HORIZON_DAYS = 7
+
+
+def _v55_live_audit_run(*, out, manifest_uri, bucket,
+        horizon_days=_V55_LIVE_AUDIT_MAX_HORIZON_DAYS, max_games=0,
         live_manifest_uri=None, extra_quotes_uri=None):
     import joblib
     import pandas as pd
@@ -363,12 +367,14 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
     import ncaaf_v55_backend as backend
     import ncaaf_v55_board as board_mod
 
+    horizon_days=min(horizon_days,_V55_LIVE_AUDIT_MAX_HORIZON_DAYS)
     now=datetime.now(timezone.utc)
     bq=bigquery.Client(project='sharplogger')
     gcs=storage.Client(project='sharplogger')
     capture_producer=os.getenv('NCAAF_V55_LIVE_AUDIT_PRODUCER_ENABLED','1').strip().lower() not in ('0','false','off','no')
     result={'schema':'NCAAF_V55_MODEL_TO_LIVE_MARKET_INTEGRITY_AUDIT_V2',
             'created_at_utc':now.isoformat(),
+            'horizon_days':horizon_days,
             'scope':('PROSPECTIVE_ORIGINAL_CAPTURE_WRITE_AND_SHADOW_SCORE' if capture_producer
                      else 'READ_ONLY_CURRENT_FORWARD_SHADOW'),
             'authority_changed':False, 'bet_authority':0,
@@ -686,7 +692,8 @@ def main():
                 manifest_uri=os.getenv("NCAAF_V55_ML_MANIFEST_URI",
                     "gs://sharp-models/research/ncaaf/v55/ml/current_manifest.json"),
                 bucket=bucket,
-                horizon_days=int(os.getenv("NCAAF_V55_LIVE_AUDIT_HORIZON_DAYS", "14")),
+                horizon_days=int(os.getenv("NCAAF_V55_LIVE_AUDIT_HORIZON_DAYS",
+                                           str(_V55_LIVE_AUDIT_MAX_HORIZON_DAYS))),
                 max_games=int(os.getenv("NCAAF_V55_LIVE_AUDIT_MAX_GAMES", "0")),
                 live_manifest_uri=os.getenv("NCAAF_V55_SEVEN_BRAIN_MANIFEST_URI", ""),
                 extra_quotes_uri=os.getenv("NCAAF_V55_OTHER_MARKET_QUOTES_URI", ""),
