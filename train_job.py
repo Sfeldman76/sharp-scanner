@@ -492,6 +492,16 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
         found=stage('original_live_seven_brain_events',lambda:backend.read_seven_brain_signal_sources(
             manifest_signals,bq,now=now,storage_client=gcs))
         if found is not None:signals,signal_audit=found
+    else:
+        uri=os.getenv('NCAAF_V55_LIVE_SIGNALS_URI','').strip()
+        table=os.getenv('NCAAF_V55_LIVE_SIGNALS_BQ_TABLE','').strip()
+        if uri or table:
+            found=stage('original_live_seven_brain_events',lambda:
+                backend.read_rows(uri) if uri else backend.read_original_live_signals_from_bq(bq,table,now=now))
+            if found is not None:
+                signals=found
+                signal_audit={'status':'CONFIGURED_LIVE_EVENTS_READ','accepted_events':len(signals),
+                              'source':uri or table}
     # Reconcile the same issuer registry + optional independent proof inputs.
     # This does not convert descriptive game grades into live-qualified rules.
     proof=stage('frozen_rule_evidence_reconciliation',lambda:
@@ -541,7 +551,7 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
         if canonical is not None:
             signals,canonical_audit=canonical
             result['stages']['live_signal_canonical_game_join'].update(canonical_audit)
-    qrows=[]
+    qrows=[];pair_ok=[];current=[];historical_grades=None
     if board is not None:
         current=backend.row_quotes(board.to_dict('records'))
         auto_other=stage('h2h_totals_current_scanner_quotes',lambda:
@@ -576,6 +586,21 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
             backend.grade_v55_live_picks_from_history(gcs,bucket,signals,pair_ok,bq_client=bq))
         if historical_grades is not None:
             result['stages']['current_pick_historical_grades'].update(historical_grades)
+        registry_uri=os.getenv('NCAAF_V55_ROI_REGISTRY_URI','').strip() or (
+            'gs://'+bucket+'/research/ncaaf/v55/two_engine_roi/current_registry.json')
+        try:
+            registry=backend.read_registry(registry_uri)
+            registry_read_error=None
+        except Exception as exc:
+            registry=None
+            registry_read_error=type(exc).__name__+':'+str(exc)[:200]
+        handoff=stage('graded_pick_authority_handoff',lambda:
+            backend.evaluate_v55_grade_handoff(board.to_dict('records'),signals,registry,historical_grades,
+                                              extra_quotes=current,allow_authority=False))
+        if handoff is not None:
+            result['stages']['graded_pick_authority_handoff'].update(
+                handoff[1]['graded_pick_authority_handoff'],registry_uri=registry_uri,
+                registry_read_error=registry_read_error)
     event_count=_v55_audit_Counter(backend.family(x.get('source_family') or x.get('Source_Family')) for x in signals)
     capture_refs={str(x.get('signal_capture_ref') or x.get('source_capture_ref')) for x in signals}
     result['live_signal_reconciliation']={

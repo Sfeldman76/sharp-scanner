@@ -1445,7 +1445,9 @@ def _v55_direct_current_quote_rows(board, market, *, now=None):
         for side,spread in ((home,hv),(away,av)):
             opt=parts.loc[parts['_side'].eq(side)&parts['_spread'].sub(spread).abs().le(.001)].sort_values('_obs',ascending=False)
             if opt.empty:chosen=[];break
-            chosen.append(opt.iloc[0].copy())
+            hit=opt.iloc[0].copy()
+            hit['V55_Is_Regular_Season']=r.get('V55_Is_Regular_Season')
+            chosen.append(hit)
         if len(chosen)!=2:continue
         if abs((chosen[0]['_obs']-chosen[1]['_obs']).total_seconds())>900:continue
         games+=1
@@ -2565,7 +2567,12 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
         for rule in rules.values():
             field=rule['signal']
             if field not in hits.columns:continue
-            src=hits.loc[hits['_obs'].ge(rule['qualified_at'])]
+            research_only=rule.get('historical_screen_only') is True
+            if research_only:
+                if _price(r.get('V55_Is_Regular_Season'))!=1 or 'V55_Is_Regular_Season' not in hits:continue
+                src=hits.loc[pd.to_numeric(hits['V55_Is_Regular_Season'],errors='coerce').eq(1)]
+            else:
+                src=hits.loc[hits['_obs'].ge(rule['qualified_at'])]
             if src.empty:continue
             if rule['ready_field']:
                 if rule['ready_field'] not in src.columns:continue
@@ -2584,8 +2591,10 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
                 direct=hit.get('V55_Live_Computed_On_Current_Quote') is True
                 source_status='PRE_GAME_VERIFIED_LIVE_RECALCULATED' if direct else 'PRE_GAME_VERIFIED'
                 record=dict(zip(columns,(gid,kick.isoformat(),rule['family'],rule['id'],
-                    rule['key'],direction,hit['_obs'].isoformat(),rule['qualified_at'].isoformat(),
-                    'QUALIFIED_OOS','PASS',True,source_status,book,
+                    rule['key'],direction,hit['_obs'].isoformat(),
+                    None if research_only else rule['qualified_at'].isoformat(),
+                    'HISTORICAL_RESEARCH_ONLY' if research_only else 'QUALIFIED_OOS',
+                    'NOT_CERTIFIED' if research_only else 'PASS',True,source_status,book,
                     float(hit['_spread']),rule['report_sha256'])))
                 if direct:record['Observed_Quote_UTC']=str(hit.get('V55_Original_Quote_Timestamp'))
                 if key not in dedup or hit['_obs']>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=record
