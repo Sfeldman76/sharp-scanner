@@ -323,6 +323,37 @@ def _v55_live_qualification_evidence_reconcile(gcs, bucket, backend):
     return out
 
 
+def _v55_live_audit_latest_spread_quotes(bq, table, *, now, horizon_days):
+    from google.cloud import bigquery
+
+    # The board's existing fixture join and same-book pair checks select the
+    # newest verified spread pair from the recorded sportsbook observations.
+    query = f"""
+        SELECT Game_Start, Home_Team_Norm, Away_Team_Norm, Outcome, Outcome_Norm,
+               Value, Odds_Price, Bookmaker, Book, Snapshot_Timestamp, Game_Key
+        FROM `{table}`
+        WHERE UPPER(TRIM(CAST(Sport AS STRING))) = 'NCAAF'
+          AND LOWER(TRIM(CAST(Market AS STRING))) = 'spreads'
+          AND Game_Start > @now
+          AND Game_Start <= TIMESTAMP_ADD(@now, INTERVAL @horizon DAY)
+          AND Snapshot_Timestamp <= @now
+          AND SAFE_CAST(Value AS FLOAT64) BETWEEN -100 AND 100
+          AND ABS(SAFE_CAST(Odds_Price AS FLOAT64)) >= 100
+        QUALIFY DENSE_RANK() OVER (
+          PARTITION BY Game_Start, Home_Team_Norm, Away_Team_Norm,
+                       COALESCE(NULLIF(TRIM(Bookmaker), ''), TRIM(Book)),
+                       COALESCE(NULLIF(TRIM(Outcome), ''), TRIM(Outcome_Norm)),
+                       SAFE_CAST(Value AS FLOAT64)
+          ORDER BY Snapshot_Timestamp DESC
+        ) = 1
+    """
+    config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter('now', 'TIMESTAMP', now),
+        bigquery.ScalarQueryParameter('horizon', 'INT64', horizon_days),
+    ])
+    return bq.query(query, job_config=config).to_dataframe(create_bqstorage_client=False)
+
+
 def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games=0,
         live_manifest_uri=None, extra_quotes_uri=None):
     import joblib
@@ -394,14 +425,18 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
 
     quote_frame=None;board=None
     if fixture_frame is not None:
-        quote_frame=stage('live_scanner_quote_read',lambda:board_mod.read_scanner_quotes(
-            bq,minutes=180,horizon_days=horizon_days))
+        quote_frame=stage('live_scanner_quote_read',lambda:_v55_live_audit_latest_spread_quotes(
+            bq,board_mod.MARKET_TABLE,now=now,horizon_days=horizon_days))
         if quote_frame is not None:
+            oldest_quote=pd.to_datetime(quote_frame['Snapshot_Timestamp'],utc=True,errors='coerce').min()
+            max_age_minutes=(int((now-oldest_quote).total_seconds()//60)+1
+                             if pd.notna(oldest_quote) else 1)
             joined=stage('paired_quote_to_fixture_join', lambda:board_mod.attach_verified_backend_quotes(
-                fixture_frame,quote_frame,now=now,max_age_minutes=180))
+                fixture_frame,quote_frame,now=now,max_age_minutes=max_age_minutes))
             if joined is not None:
                 board,quote_audit=joined
                 result['stages']['paired_quote_to_fixture_join'].update(quote_audit)
+                result['stages']['live_scanner_quote_read']['quote_policy']='LATEST_VERIFIED_PREGAME_PAIR'
                 result['stages']['paired_quote_to_fixture_join']['quote_state_counts']=dict(_v55_audit_Counter(
                     board.get('Quote_State',pd.Series(dtype='object')).astype(str)))
 
@@ -462,14 +497,18 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
             result['stages']['prospective_live_brain_producer'].update(producer_audit)
             result['stages']['prospective_live_brain_producer']['new_capture_refs']=[
                 str(e.get('signal_capture_ref')) for e in produced[:12]]
+            refs={str(x.get('signal_capture_ref')) for x in signals}
+            signals.extend(x for x in produced if str(x.get('signal_capture_ref')) not in refs)
     elif not capture_producer:
         result['stages']['prospective_live_brain_producer']={'status':'DISABLED_READ_ONLY_MODE'}
     else:
         result['stages']['prospective_live_brain_producer']={
             'status':'NOT_RUN_MISSING_BOARD_OR_QUOTES'}
     # Read only genuine existing prospectively captured original decisions.
+    scoring_time=datetime.now(timezone.utc)
     captured=stage('existing_prospective_live_captures',lambda:
-        backend.read_recent_v55_prospective_captures(gcs,bucket,now=now))
+        backend.read_recent_v55_prospective_captures(
+            gcs,bucket,now=scoring_time,include_reference_quotes=True))
     if captured is not None:
         saved,saved_audit=captured
         refs={str(x.get('signal_capture_ref')) for x in signals}
@@ -511,7 +550,8 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
         if extra_quotes_uri:
             extra=stage('h2h_totals_quote_ingest',lambda:backend.read_rows(extra_quotes_uri))
             if extra is not None:current.extend(extra)
-        raw_normalized=[q for r in current if (q:=backend.quote_normal(r,now,age_limit=180))]
+        raw_normalized=[q for r in current if (q:=backend.quote_normal(
+            r,scoring_time,age_limit=None if backend.market(r.get('market'))=='spreads' else 180))]
         qrows=[{**q,'kickoff_utc':q['kickoff'].isoformat(),
                 'quote_observed_at_utc':q['quote'].isoformat()} for q in raw_normalized]
         pair_ok,pair_holds=backend.v55_validate_shadow_quote_pairs(qrows)
@@ -520,7 +560,7 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
             'pair_rejection_counts':dict(pair_holds),'market_counts':dict(_v55_audit_Counter(q['market'] for q in pair_ok))}
     if inputs and qrows and specs and manifest is not None:
         shadow=stage('existing_backend_score_snapshot',lambda:backend.score_snapshot(
-            specs,manifest,inputs,qrows,signals,now=now))
+            specs,manifest,inputs,qrows,signals,now=scoring_time))
         if shadow is not None:
             result['scoring']={k:v for k,v in shadow.items() if k!='records'}
             rows=shadow.get('records',[])

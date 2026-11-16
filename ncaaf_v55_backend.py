@@ -148,7 +148,8 @@ def quote_normal(raw,at,age_limit=15):
     if (not gid or m not in ('spreads','h2h','totals') or not book or
         side not in (('OVER','UNDER') if m=='totals' else ('HOME','AWAY')) or
         not kick or not quoted or not quoted<=at<kick or quoted>=kick or
-        (at-quoted).total_seconds()>age_limit*60 or profit(odds) is None or
+        (age_limit is not None and (at-quoted).total_seconds()>age_limit*60) or
+        profit(odds) is None or
         (m!='h2h' and (line is None or round(line*2)!=line*2)) or
         not truth(raw.get('paired_source_verified')) or
         not (truth(raw.get('backend_published_quote_verified')) or s(raw.get('quote_capture_ref')))):
@@ -185,6 +186,8 @@ def signals_by_side(events,boards,quotes,at):
     origins=defaultdict(dict);rejected=Counter()
     bmap={s(r.get('Game_ID') or r.get('game_id')):r for r in boards}
     for e in events:
+        if e.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
+            rejected['SHADOW_ONLY_MARKET_RULE']+=1;continue
         gid=s(e.get('game_id') or e.get('Game_ID'))
         f=family(e.get('source_family') or e.get('Source_Family'))
         sid=s(e.get('system_id') or e.get('Signal_Family') or e.get('Rule_ID'))
@@ -1677,9 +1680,12 @@ def connect_v55_existing_historical_rules(storage_client, bucket, *, now=None):
         return None,audit
 
 
+V55_RECOVERED_MARKET_PRODUCER = 'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW'
+
+
 def produce_v55_recovered_market_shadow(board, historical_registry, *,
                                          storage_client, bucket, now=None):
-    """Execute recovered *market-only* recipes on genuine current quotes.
+    """Execute recovered market-only recipes on the latest verified pregame pairs.
 
     Does not infer non-market pregame features, grant historical OOS approval,
     or create ROI certificates. Writes first-seen prospective events only.
@@ -1687,14 +1693,18 @@ def produce_v55_recovered_market_shadow(board, historical_registry, *,
     at=clock(now) if now is not None else datetime.now(timezone.utc)
     rules={k:r for k,r in (historical_registry.get('rules') or {}).items()
            if k[0]=='SYSTEM_MINER' and r.get('qualification_level')=='HISTORICAL_SCREEN_ONLY'}
-    holds=Counter();prepared=[]
+    holds=Counter();prepared=[];latest={}
+    audit={'frozen_rules':len(rules),'quote_policy':'LATEST_VERIFIED_PREGAME_PAIR',
+           'evaluated_games':0,'pairs_over_15_minutes':0,'matched_rule_sides':0,
+           'bet_authority':0}
     if hasattr(board,'to_dict'):board=board.to_dict('records')
     if not rules:
         return [],{'status':'NO_RECOVERED_MARKET_SHADOW_RULES','fired':0,'holds':{},'bet_authority':0}
     # Exclude repeat firings for identical quote+rule+side between audit cycles.
     prior_ids=set()
     try:
-        prior,_=read_recent_v55_prospective_captures(storage_client,bucket,now=at)
+        prior,_=read_recent_v55_prospective_captures(
+            storage_client,bucket,now=at,include_reference_quotes=True)
         prior_ids={s(x.get('capture_id')) for x in prior}
     except Exception:
         # If prior-capture inspection fails, fail closed rather than emitting
@@ -1707,15 +1717,22 @@ def produce_v55_recovered_market_shadow(board, historical_registry, *,
         quoted=clock(row.get('Backend_Quote_Timestamp'))
         book=s(row.get('Backend_Quote_Book')).lower()
         state=s(row.get('Quote_State'))
-        if not (gid and kick and quoted and quoted<=at<kick and book and
-                (at-quoted).total_seconds()<=900 and state.startswith('FRESH_')):
-            holds['MISSING_FRESH_PAIRED_PREGAME_QUOTE']+=1;continue
+        if not (gid and book and state.startswith('FRESH_TWO_SIDED_')):
+            holds['NO_VERIFIED_TWO_SIDED_SPREAD']+=1;continue
+        if not (kick and quoted and quoted<=at<kick):
+            holds['PREGAME_QUOTE_CHRONOLOGY_INVALID']+=1;continue
         prices={side:(num(row.get('Backend_'+prefix+'_Spread')),
                       num(row.get('Backend_'+prefix+'_Odds_American')))
                 for side,prefix in (('HOME','Home'),('AWAY','Away'))}
         if (any(ln is None or profit(odds) is None for ln,odds in prices.values())
             or abs(prices['HOME'][0]+prices['AWAY'][0])>0.01):
             holds['SPREAD_SIDE_PAIR_INVALID']+=1;continue
+        previous=latest.get(gid)
+        if previous is None or (quoted,book)>(previous[0],previous[1]):
+            latest[gid]=(quoted,book,kick,prices)
+    audit['evaluated_games']=len(latest)
+    for gid,(quoted,book,kick,prices) in latest.items():
+        audit['pairs_over_15_minutes']+=int((at-quoted).total_seconds()>900)
         for side,(line,odds) in prices.items():
             observed={'CURRENT_SPREAD':line}
             for (fam,sid),rule in rules.items():
@@ -1723,6 +1740,7 @@ def produce_v55_recovered_market_shadow(board, historical_registry, *,
                 if (not cond or any(c.get('field') not in observed for c in cond)
                     or not all(_v55_exact_condition(observed,c) for c in cond)):
                     continue
+                audit['matched_rule_sides']+=1
                 selected_side=side if rule['direction']=='PLAY_ON' else (
                     'HOME' if side=='AWAY' else 'AWAY')
                 sel_line,sel_odds=prices[selected_side]
@@ -1747,7 +1765,7 @@ def produce_v55_recovered_market_shadow(board, historical_registry, *,
                     'prospective_evaluation_after_quote':True,
                     'original_event_created_prospectively':True,
                     'capture_id':capture_id,'signal_capture_ref':None,
-                    'producer':'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW',
+                    'producer':V55_RECOVERED_MARKET_PRODUCER,
                     'rule_registry_sha256':historical_registry['report_sha256'],
                     'historical_posterior_prob':rule['historical_posterior_prob'],
                     'qualification_level':'HISTORICAL_SCREEN_ONLY',
@@ -1755,16 +1773,16 @@ def produce_v55_recovered_market_shadow(board, historical_registry, *,
                     'historical_betting_roi_certified':False,
                     'bet_authority':0})
     if not prepared:
-        return [],{'status':'NO_NEW_RECOVERED_MARKET_FIRINGS','fired':0,
-                   'frozen_rules':len(rules),'holds':dict(holds),'bet_authority':0}
+        return [],{**audit,'status':'NO_NEW_RECOVERED_MARKET_FIRINGS','fired':0,
+                   'holds':dict(holds)}
     try:
         captured,cap=persist_v55_prospective_events(prepared,storage_client,bucket,now=at)
     except Exception as exc:
-        return [],{'status':'HOLD_RECOVERED_CAPTURE_WRITE_FAILED','fired':0,
+        return [],{**audit,'status':'HOLD_RECOVERED_CAPTURE_WRITE_FAILED','fired':0,
                    'error':type(exc).__name__+':'+str(exc)[:200],
                    'holds':dict(holds),'bet_authority':0}
-    return captured,{'status':'PASS_RECOVERED_SHADOW_CAPTURES','fired':len(captured),
-                     'frozen_rules':len(rules),'holds':dict(holds),
+    return captured,{**audit,'status':'PASS_RECOVERED_SHADOW_CAPTURES','fired':len(captured),
+                     'holds':dict(holds),
                      'capture':cap,'bet_authority':0,
                      'independent_of_core':True,
                      'historical_authority_claimed':False}
@@ -2014,6 +2032,8 @@ def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
     audit['original_events_persisted']=len(unique)
     audit['by_family']=dict(Counter(family(e.get('source_family')) for e in unique))
     if unique:audit['status']='PASS_ORIGINAL_PROSPECTIVE_CAPTURES_PERSISTED'
+    elif (qualified or {}).get('historical_screen_only'):
+        audit['status']=audit['miner_producer']['status']
     elif audit.get('rule_registry',{}).get('validation_hold'):
         audit['status']='HOLD_FROZEN_RULE_ATTESTATION_REQUIRED'
     elif audit['expert_producer'].get('status','').startswith('HOLD'):
@@ -2023,7 +2043,8 @@ def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
 
 
 def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
-                                         hours=24, max_objects=300):
+                                         hours=24, max_objects=300,
+                                         include_reference_quotes=False):
     """Read actual immutable prospective captures, never retrospective events.
 
     A missing capture is missing evidence, not a synthetic no-fire. Only objects
@@ -2058,11 +2079,15 @@ def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
             capture=s(ev.get('signal_capture_ref'))
             quote_ref=s(ev.get('quote_capture_ref'))
             ident=s(ev.get('capture_id'))
+            reference_quote=(include_reference_quotes and
+                ev.get('producer')==V55_RECOVERED_MARKET_PRODUCER and
+                ev.get('qualification_level')=='HISTORICAL_SCREEN_ONLY' and
+                ev.get('bet_authority')==0 and fam=='SYSTEM_MINER')
             if (fam not in BRAINS or not ident or capture!=uri+'#'+ident
                 or not quote_ref or not truth(ev.get('direction_verified'))
                 or not signal_time or not quote_time or not kickoff
                 or not quote_time<=signal_time<=at<kickoff
-                or (signal_time-quote_time).total_seconds()>900
+                or (not reference_quote and (signal_time-quote_time).total_seconds()>900)
                 or (at-signal_time).total_seconds()>hours*3600
                 or not s(ev.get('game_id')) or not s(ev.get('system_id'))):
                 holds['INVALID_OR_EXPIRED_ORIGINAL_CAPTURE']+=1;continue
@@ -2802,6 +2827,9 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     # Exact accepted event kickoff by game. Do not attribute stale, fabricated
     # or postgame expert evidence to the live prospective shadow.
     kickoffs={str(q['game_id']):clock(q.get('kickoff_utc')) for q in quotes}
+    spread_prices={(s(q.get('game_id')),s(q.get('side')).upper(),s(q.get('book')).lower(),
+                    num(q.get('line')),num(q.get('odds')),clock(q.get('quote_observed_at_utc')))
+                   for q in quotes if q.get('market')=='spreads'}
     signal_holds=Counter()
     for ev in signals:
         if not isinstance(ev,dict):continue
@@ -2818,6 +2846,13 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
         # 'signal_capture_ref'. A bare direction_verified flag is insufficient.
         if not (s(ev.get('signal_capture_ref')) or s(ev.get('source_capture_ref'))):
             signal_holds['EXPERT_ORIGINAL_CAPTURE_PROVENANCE_MISSING']+=1;continue
+        if ev.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
+            quoted=clock(ev.get('quote_observed_at_utc'))
+            price=(key,s(ev.get('side')).upper(),s(ev.get('book')).lower(),
+                   num(ev.get('line')),num(ev.get('odds')),quoted)
+            if not (quoted and quoted<=signal_time and
+                    clock(ev.get('kickoff_utc'))==kickoff and price in spread_prices):
+                signal_holds['RECOVERED_SIGNAL_QUOTE_NO_LONGER_CURRENT']+=1;continue
         if fam in ('CORE','STAT','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH'):
             signal_counts[key].add(fam)
         mkt=market(ev.get('market') or ev.get('Market'))
