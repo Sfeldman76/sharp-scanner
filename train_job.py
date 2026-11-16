@@ -358,6 +358,119 @@ def _v55_live_audit_latest_spread_quotes(bq, table, *, now, horizon_days):
 _V55_LIVE_AUDIT_MAX_HORIZON_DAYS = 7
 
 
+def _v55_grade_live_picks_from_history(gcs, bucket, backend, signals, verified_quotes):
+    """Price current captured systems using their existing canonical game grades."""
+    import ncaaf_v55_research as research
+
+    def quote_key(row):
+        return (str(row.get('game_id') or ''), backend.market(row.get('market')),
+                str(row.get('book') or '').lower(), str(row.get('side') or '').upper(),
+                backend.num(row.get('line')), backend.num(row.get('odds')),
+                backend.clock(row.get('quote_observed_at_utc')),
+                backend.clock(row.get('kickoff_utc')))
+
+    current_quotes={quote_key(row) for row in verified_quotes}
+    picks={}
+    for event in signals:
+        key=quote_key(event)
+        origin=(backend.family(event.get('source_family')),
+                str(event.get('system_id') or ''),key[1])
+        pick=(origin,key)
+        observed=backend.clock(event.get('signal_observed_at_utc'))
+        if (key not in current_quotes or origin[0] not in backend.BRAINS or not origin[1]
+                or not observed or not key[6] or not key[7] or observed>=key[7]
+                or not backend.truth(event.get('direction_verified'))
+                or not (event.get('signal_capture_ref') or event.get('source_capture_ref'))):
+            continue
+        if pick not in picks or observed<picks[pick]:
+            picks[pick]=observed
+    if not picks:
+        return {'status':'NO_CURRENT_CAPTURED_PICKS_WITH_EXACT_VERIFIED_QUOTE','picks':[]}
+
+    root=f'gs://{bucket}/research/ncaaf/v55/'
+    canonical=root+'canonical_stage1/v5_2/'
+    history_uri=root+'two_engine_roi/frozen_brain_canonical_events_latest.jsonl'
+    manifest,sides,audit=(research._obj_bytes(canonical+name,gcs) for name in (
+        'historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
+        'stage1_canonical_ledger_v5_audit.json'))
+    _,games,_,team_map,_=research._checked_canonical(manifest,sides,audit)
+    origins={origin for origin,_ in picks}
+    grades={origin:{} for origin in origins}
+    conflicts=set()
+    history=research._obj_bytes(history_uri,gcs)
+    for raw in history.splitlines():
+        if not raw.strip():
+            continue
+        row=json.loads(raw)
+        origin=(row.get('brain'),row.get('system_id'),row.get('market'))
+        if origin not in origins:
+            continue
+        year=int(row['season'])
+        game=(year,str(row['cfbd_game_id']))
+        # The Stage 1 historical ledger is a retrospective source. Any future
+        # 2026 extension needs a verified final-availability time per game.
+        if not 2013<=year<=2025 or game not in games:
+            continue
+        selected=row.get('target')
+        if origin[2]=='totals':
+            continue  # Canonical game-side rows have no verified reference total.
+        side=team_map.get(game,{}).get(selected)
+        if not side:
+            continue
+        line=side.get('retrospective_open_spread') if origin[2]=='spreads' else None
+        outcome=research.grade(origin[2],'HOME',line,side.get('team_score'),
+                               side.get('opponent_score'))
+        if not outcome:
+            continue
+        entry=(selected,outcome)
+        if game in grades[origin] and grades[origin][game]!=entry:
+            conflicts.add((origin,game))
+        grades[origin][game]=entry
+
+    by_origin={}
+    for origin,history_by_game in grades.items():
+        counts={}
+        for game,(_,outcome) in history_by_game.items():
+            if (origin,game) not in conflicts:
+                counts.setdefault(str(game[0]),_v55_audit_Counter())[outcome]+=1
+        yearly={year:{'wins':c['WIN'],'losses':c['LOSS'],'pushes':c['PUSH']}
+                for year,c in sorted(counts.items())}
+        screen=backend.v55_full_history_statistical_screen(yearly)
+        wins,losses=screen['wins'],screen['losses']
+        by_origin[origin]={'by_season':yearly,'wins':wins,'losses':losses,
+            'pushes':sum(c['pushes'] for c in yearly.values()),
+            'cover_rate_excluding_pushes':wins/(wins+losses) if wins+losses else None,
+            'stability_posterior_above_50pct':screen['posterior_prob'],
+            'stability_pass':screen['pass']}
+
+    result=[]
+    for (origin,key),observed in sorted(picks.items(),key=lambda item:str(item[0])):
+        gid,market,book,side,line,odds,quoted,_=key
+        evidence=by_origin[origin]
+        gain=backend.profit(odds)
+        rate=evidence['cover_rate_excluding_pushes']
+        n=evidence['wins']+evidence['losses']+evidence['pushes']
+        ev=((evidence['wins']*gain-evidence['losses'])/n
+            if n and gain is not None else None)
+        result.append({'game_id':gid,'market':market,'side':side,'book':book,
+            'line':line,'odds':odds,'source_family':origin[0],'system_id':origin[1],
+            'observed_at_utc':observed.isoformat(),'quote_observed_at_utc':quoted.isoformat(),
+            'break_even_excluding_pushes':1/(1+gain) if gain is not None else None,
+            'historical_cover_rate':rate,'estimated_ev_per_unit':ev,
+            'history':evidence,'grade_status':'GRADED' if ev is not None else 'NO_MATCHED_HISTORICAL_GRADES',
+            'bet_authority':0})
+    graded_picks=sum(row['grade_status']=='GRADED' for row in result)
+    return {'status':('GRADED_AVAILABLE_CANONICAL_HISTORY' if graded_picks
+                      else 'HOLD_NO_MATCHED_HISTORICAL_GRADES'),
+            'graded_picks':graded_picks,'history_uri':history_uri,
+            'history_sha256':hashlib.sha256(history).hexdigest(),
+            'requested_seasons':list(range(2013,2027)),
+            'canonical_archive_seasons':sorted({year for year,_ in games}),
+            '2026_status':'VERIFIED_FINAL_AVAILABILITY_SOURCE_NOT_CONNECTED',
+            'conflicting_system_game_grades_excluded':len(conflicts),
+            'picks':result,'bet_authority':0}
+
+
 def _v55_live_audit_run(*, out, manifest_uri, bucket,
         horizon_days=_V55_LIVE_AUDIT_MAX_HORIZON_DAYS, max_games=0,
         live_manifest_uri=None, extra_quotes_uri=None):
@@ -566,6 +679,10 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
         result['stages']['market_quote_normalization']={'status':'PASS' if pair_ok else 'HOLD_NO_VERIFIED_SAME_BOOK_PAIR',
             'input_quote_rows':len(current),'normalized_rows':len(qrows),'paired_rows':len(pair_ok),
             'pair_rejection_counts':dict(pair_holds),'market_counts':dict(_v55_audit_Counter(q['market'] for q in pair_ok))}
+        historical_grades=stage('current_pick_historical_grades',lambda:
+            _v55_grade_live_picks_from_history(gcs,bucket,backend,signals,pair_ok))
+        if historical_grades is not None:
+            result['stages']['current_pick_historical_grades'].update(historical_grades)
     if inputs and qrows and specs and manifest is not None:
         shadow=stage('existing_backend_score_snapshot',lambda:backend.score_snapshot(
             specs,manifest,inputs,qrows,signals,now=scoring_time))
