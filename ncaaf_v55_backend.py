@@ -1790,15 +1790,12 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days):
                     'conflicting_openers':sum(len(lines)>1 for lines in candidates.values())}
 
 
-def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
-                                 bq_client=None, horizon_days=7, now=None):
-    """Evaluate the published full-history library with its pinned atom provider."""
+def _v55_published_miner_library(storage_client, bucket):
+    """Verify the library and atom evaluator shared by live and historical scoring."""
     import ast
     import inspect
-    import pandas as pd
     import ncaaf_research_v2 as miner
 
-    at=clock(now) if now is not None else datetime.now(timezone.utc)
     root='research/ncaaf/v55/unified_executable_miner_library_v2/'
     protocol='V55-EXECUTABLE-UNIFIED-FULL-HISTORY-2013-2025-R2'
     storage=storage_client.bucket(bucket)
@@ -1830,7 +1827,16 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         if (rule_id!=rule['rule_id'] or not rule['atoms'] or rule['direction'] not in ('PLAY_ON','FADE')
                 or rule.get('live_authority_eligible') is not False or rule.get('legacy_incumbent') is not False):
             raise ValueError('INVALID_FROZEN_MINER_RULE:'+rule['rule_id'])
+    return rules,counts,uri,digest,miner._extended_atoms
 
+
+def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
+                                 bq_client=None, horizon_days=7, now=None):
+    """Evaluate the published full-history library with its pinned atom provider."""
+    import pandas as pd
+
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    rules,counts,uri,digest,evaluate_atoms=_v55_published_miner_library(storage_client,bucket)
     board_rows=board.to_dict('records') if hasattr(board,'to_dict') else board
     fixtures={s(r.get('Game_ID')):r for r in board_rows}
     features={s(r.get('game_id')):r for r in feature_rows}
@@ -1866,7 +1872,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         except Exception as exc:
             audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
                                      'error':type(exc).__name__+':'+str(exc)[:200]}
-    for mkt in markets:
+    for mkt in counts:
         market_rules=[r for r in rules if r['market']==mkt]
         stats={'rules':len(market_rules),'source_games':0,'fired':0,'not_met':0,
                'missing_inputs':0,'already_captured':0}
@@ -1896,7 +1902,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 row['Opening_Spread' if mkt=='spreads' else 'Opening_Total']=opener
             # Do not map current quotes into opening fields. Venue atoms
             # require a verified site role, which this fixture feed lacks.
-            atoms={r['name']:bool(r['mask'][0]) for r in miner._extended_atoms(
+            atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                 pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
                 market=mkt,enforce_support_floor=False)}
             stats['source_games']+=1
@@ -2440,9 +2446,197 @@ def read_current_other_market_quotes(bq_client, board_rows, *, now=None,
         'holds':dict(holds),'bet_authority':0}
 
 
+def _v55_historical_miner_open_totals(bq, games, native_ids, team_map):
+    """Read labeled opening totals from the original historical training view."""
+    table='sharplogger.sharp_data.ncaaf_historical_core_training_vw'
+    fields={f.name for f in bq.get_table(table).schema}
+    id_fields=[c for c in ('Source_Game_ID','Game_Key','Game_ID') if c in fields]
+    line_fields=[c for c in ('Consensus_Open_Total','Opening_Total') if c in fields]
+    team_fields=['Canonical_Team_Norm','Opponent_Canonical_Team_Norm']
+    if not id_fields or not line_fields or not {'Season',*team_fields}<=fields:
+        return {},{'status':'HISTORICAL_OPEN_TOTAL_COLUMNS_UNAVAILABLE','source':table}
+    columns=','.join(f'`{c}`' for c in ['Season',*id_fields,*line_fields,*team_fields])
+    rows=bq.query(f'SELECT {columns} FROM `{table}` '
+                  'WHERE SAFE_CAST(Season AS INT64) BETWEEN 2013 AND 2025').result()
+    seen=defaultdict(set)
+    for row in rows:
+        year=int(row['Season'])
+        candidates=set()
+        for c in id_fields:
+            raw=_v55_live_id(row[c])
+            if (year,raw) in games:
+                candidates.add(raw)
+            if resolved:=native_ids.get((year,raw)):
+                candidates.add(resolved)
+        if len(candidates)!=1:
+            continue
+        game=(year,next(iter(candidates)))
+        names={_v55_cfbd_school_key(row[c]) for c in team_fields}
+        sides=team_map[game]
+        aliases=[{_v55_cfbd_school_key(v) for v in (name,entry.get('source_team_label')) if v}
+                 for name,entry in sides.items()]
+        if len(names)!=2 or '' in names or any(len(names & a)!=1 for a in aliases) or not names<=set.union(*aliases):
+            continue
+        line=next((v for c in line_fields if (v:=num(row[c])) is not None),None)
+        if line is not None and 1<=line<=150:
+            seen[game].add(line)
+    opens={key:next(iter(lines)) for key,lines in seen.items() if len(lines)==1}
+    return opens,{'status':'HISTORICAL_OPEN_TOTALS_READ' if opens else 'NO_MATCHED_HISTORICAL_OPEN_TOTALS',
+                  'source':table,'games':len(opens),'conflicting_games':len(seen)-len(opens)}
+
+
+def _v55_replay_miner_history(bq, games, native_ids, team_map, rules, evaluate_atoms, grades, conflicts):
+    """Fill game-level gaps using exact frozen rules and the live home-side inputs."""
+    import numpy as np
+    import pandas as pd
+    from ncaaf_v55_research import grade
+
+    coverage=Counter()
+    opens={}
+    totals_audit={}
+    if any(origin[2]=='totals' for origin in rules):
+        try:
+            opens,totals_audit=_v55_historical_miner_open_totals(bq,games,native_ids,team_map)
+        except Exception as exc:
+            totals_audit={'status':'HOLD_HISTORICAL_OPEN_TOTAL_SOURCE',
+                          'error':type(exc).__name__+':'+str(exc)[:200]}
+
+    # The original Miner warehouse includes shifted pregame priors alongside
+    # final stats. Select only prior columns, with the same field names as live.
+    tables=('sharplogger.sharp_data.ncaaf_cfbd_miner_features_postgame_v1',
+            'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1')
+    source_audits={}
+    by_game={}
+    for table in tables:
+        try:
+            fields={f.name:f.field_type.upper() for f in bq.get_table(table).schema}
+            required={'Game_ID','Game_Date','Team_Key'}
+            columns=sorted(c for c,t in fields.items() if c.startswith('CFBD_') and c.endswith('_Prior')
+                           and t in ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC','BOOLEAN','BOOL'))
+            if not required<=fields.keys() or not columns:
+                source_audits[table]={'status':'HISTORICAL_PRIOR_COLUMNS_UNAVAILABLE'}
+                continue
+            selected=','.join(f'`{c}`' for c in sorted(required)+[c for c in ('Season','Week') if c in fields]+columns)
+            year_sql='SAFE_CAST(Season AS INT64)' if 'Season' in fields else 'EXTRACT(YEAR FROM Game_Date)'
+            rows=bq.query(f'SELECT {selected} FROM `{table}` '
+                          f'WHERE {year_sql} BETWEEN 2013 AND 2025').result()
+            observed={}
+            duplicate_conflicts=set()
+            for rr in rows:
+                row=dict(rr.items())
+                year=num(row.get('Season') if 'Season' in fields else s(row['Game_Date'])[:4])
+                if year is None or year!=int(year):
+                    continue
+                game=(int(year),_v55_live_id(row['Game_ID']))
+                fixture=games.get(game)
+                if not fixture or fixture.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+                    continue
+                if s(row['Game_Date'])[:10]!=s(fixture.get('game_date'))[:10]:
+                    coverage['CANONICAL_GAME_DATE_MISMATCH']+=1
+                    continue
+                sides=team_map[game]
+                key=_v55_cfbd_school_key(row['Team_Key'])
+                matches=[name for name,side in sides.items() if key and key in {
+                    _v55_cfbd_school_key(name),_v55_cfbd_school_key(side.get('source_team_label'))}]
+                if len(matches)!=1 or s(sides[matches[0]].get('is_home_verified'))!='1':
+                    continue
+                values={c:v for c in columns if (v:=num(row.get(c))) is not None}
+                if not values:
+                    continue
+                if 'Week' in row and (week:=num(row['Week'])) is not None:
+                    values['Week']=week
+                if game in observed and observed[game]!=values:
+                    duplicate_conflicts.add(game)
+                observed[game]=values
+            for game,values in observed.items():
+                if game not in duplicate_conflicts:
+                    # Keep the original research source's value when both
+                    # warehouses supply the same prior. Fill only absent cells.
+                    by_game[game]={**values,**by_game.get(game,{})}
+            source_audits[table]={'status':'HISTORICAL_PRIORS_READ','matched_home_games':len(observed)-len(duplicate_conflicts),
+                                  'conflicting_home_games':len(duplicate_conflicts)}
+        except Exception as exc:
+            source_audits[table]={'status':'HOLD_HISTORICAL_PRIOR_SOURCE',
+                                  'error':type(exc).__name__+':'+str(exc)[:200]}
+
+    inputs=[]
+    results=[]
+    for game,fixture in sorted(games.items()):
+        year,gid=game
+        if not 2013<=year<=2025 or fixture.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            continue
+        sides=team_map[game]
+        home=[(k,r) for k,r in sides.items() if s(r.get('is_home_verified'))=='1']
+        away=[(k,r) for k,r in sides.items() if s(r.get('is_home_verified'))=='0']
+        if len(home)!=1 or len(away)!=1:
+            continue
+        hk,hr=home[0];ak,ar=away[0]
+        h,a=num(hr.get('team_score')),num(ar.get('team_score'))
+        if (h is None or a is None or h<0 or a<0 or h!=int(h) or a!=int(a)
+                or h==a or h!=num(ar.get('opponent_score')) or a!=num(hr.get('opponent_score'))):
+            coverage['CANONICAL_FINAL_SCORE_UNAVAILABLE']+=1
+            continue
+        spread=num(hr.get('retrospective_open_spread'))
+        mirror=num(ar.get('retrospective_open_spread'))
+        if spread is not None and (abs(spread)>100 or (mirror is not None and abs(spread+mirror)>1e-7)):
+            spread=None
+        total=opens.get(game)
+        inputs.append({**by_game.get(game,{}),'Season':year,'Game_Start':fixture.get('game_date'),
+                       'Team_Norm':hr.get('source_team_label') or hk,'Opponent_Norm':ar.get('source_team_label') or ak})
+        results.append((game,hk,ak,h,a,spread,total))
+
+    additions={origin:{} for origin in rules}
+    rule_audit={}
+    if inputs:
+        frame=pd.DataFrame(inputs)
+        for mkt in {origin[2] for origin in rules}:
+            # These are original opening lines. A later or untimed quote may
+            # not stand in for the opener or imply opening-to-current movement.
+            column,index=('Opening_Spread',5) if mkt=='spreads' else ('Opening_Total',6)
+            source=frame if mkt=='h2h' else frame.assign(**{column:[r[index] for r in results]})
+            atoms={row['name']:row['mask'] for row in evaluate_atoms(
+                source.dropna(axis=1,how='all'),for_live=True,market=mkt,enforce_support_floor=False)}
+            for origin,rule in rules.items():
+                if origin[2]!=mkt:
+                    continue
+                absent=sorted(set(rule['atoms'])-atoms.keys())
+                stats={'missing_atoms':absent,'rule_fires':0,'missing_result_line':0,
+                       'already_graded':0,'excluded_conflicts':0,'added_games_by_season':Counter()}
+                rule_audit[origin[1]]=stats
+                if absent:
+                    continue
+                mask=np.logical_and.reduce([atoms[name] for name in rule['atoms']])
+                stats['rule_fires']=int(mask.sum())
+                on=rule['direction']=='PLAY_ON'
+                for idx in np.flatnonzero(mask):
+                    game,hk,ak,h,a,spread,total=results[idx]
+                    if (origin,game) in conflicts:
+                        stats['excluded_conflicts']+=1
+                        continue
+                    if game in grades[origin]:
+                        stats['already_graded']+=1
+                        continue
+                    side=('OVER' if on else 'UNDER') if mkt=='totals' else ('HOME' if on else 'AWAY')
+                    line=total if mkt=='totals' else spread if on or spread is None else -spread
+                    outcome=grade(mkt,side,line,h,a)
+                    if not outcome:
+                        stats['missing_result_line']+=1
+                        continue
+                    target=side if mkt=='totals' else hk if on else ak
+                    additions[origin][game]=(target,outcome)
+                    stats['added_games_by_season'][str(game[0])]+=1
+    added=sum(map(len,additions.values()))
+    return additions,{'status':'HISTORICAL_GAME_GRADES_ADDED' if added else 'NO_ADDITIONAL_HISTORICAL_GAME_GRADES',
+                      'eligible_final_games_by_season':dict(Counter(str(row[0][0]) for row in results)),
+                      'matched_prior_games_by_season':dict(Counter(str(year) for year,_ in by_game)),
+                      'added_system_games':added,'by_rule':rule_audit,'historical_priors':source_audits,
+                      'historical_open_totals':totals_audit,'holds':dict(coverage),
+                      'history_type':'FIXED_RULE_RETROSPECTIVE_HOME_PERSPECTIVE','bet_authority':0}
+
+
 def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
                                        bq_client=None):
-    """Price current captured systems using their existing canonical game grades."""
+    """Price captured systems from saved grades and fixed-rule historical replay."""
     import ncaaf_v55_research as research
 
     def quote_key(row):
@@ -2456,6 +2650,7 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
     picks={}
     dependencies={}
     quote_sides={}
+    miner_definitions=defaultdict(set)
     for event in signals:
         if event.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
             continue
@@ -2471,6 +2666,9 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
             continue
         if pick not in picks or observed<picks[pick]:
             picks[pick]=observed
+        if event.get('producer')==V55_LIBRARY_MINER_PRODUCER and origin[0]=='SYSTEM_MINER':
+            miner_definitions[origin].add((s(event.get('rule_registry_sha256')),
+                                          s(event.get('frozen_definition_sha256'))))
         dependencies.setdefault(pick,set()).add(
             str(event.get('independence_group') or event.get('evidence_family_key') or ''))
         quote_sides.setdefault((key[0], key[1]),set()).add(key[3])
@@ -2483,7 +2681,7 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
     manifest,sides,audit=(research._obj_bytes(canonical+name,gcs) for name in (
         'historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
         'stage1_canonical_ledger_v5_audit.json'))
-    _,games,_,team_map,_=research._checked_canonical(manifest,sides,audit)
+    _,games,native_ids,team_map,_=research._checked_canonical(manifest,sides,audit)
     origins={origin for origin,_ in picks}
     grades={origin:{} for origin in origins}
     conflicts=set()
@@ -2525,6 +2723,29 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
         if game in grades[origin] and grades[origin][game]!=entry:
             conflicts.add((origin,game))
         grades[origin][game]=entry
+
+    replay={'status':'NO_CURRENT_MINER_LIBRARY_PICKS','bet_authority':0}
+    reconstructed={}
+    if miner_definitions:
+        replay['status']='HOLD_NO_HISTORICAL_WAREHOUSE_CLIENT'
+        if bq_client is not None:
+            try:
+                library,_,uri,digest,evaluate_atoms=_v55_published_miner_library(gcs,bucket)
+                rules={}
+                for rule in library:
+                    origin=('SYSTEM_MINER',rule['rule_id'],rule['market'])
+                    expected=(digest,sha((digest,rule['rule_id'])))
+                    if miner_definitions.get(origin)=={expected}:
+                        rules[origin]=rule
+                replay={'status':'NO_EXACT_FROZEN_LIBRARY_MATCH','bet_authority':0}
+                if rules:
+                    reconstructed,replay=_v55_replay_miner_history(
+                        bq_client,games,native_ids,team_map,rules,evaluate_atoms,grades,conflicts)
+                replay.update(library_uri=uri,library_sha256=digest,matched_rule_count=len(rules),
+                              unmatched_rule_ids=sorted(origin[1] for origin in miner_definitions.keys()-rules.keys()))
+            except Exception as exc:
+                replay={'status':'HOLD_FROZEN_RULE_HISTORICAL_SCORING',
+                        'error':type(exc).__name__+':'+str(exc)[:240],'bet_authority':0}
 
     # The next-season captures use the same frozen IDs as the archive. Only an
     # independently observed final timestamp can make one eligible at pick time.
@@ -2582,7 +2803,7 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
                 del history_by_game[game]
 
     def asof_grades(origin, observed, current_gid):
-        return {**grades[origin],**{
+        return {**grades[origin],**reconstructed.get(origin,{}),**{
             (2026,gid):(target,outcome) for gid,(target,outcome,final) in extension[origin].items()
             if gid!=current_gid and final<=observed and (origin,gid) not in extension_conflicts}}
 
@@ -2596,6 +2817,7 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
     for (origin,key),observed in sorted(picks.items(),key=lambda item:str(item[0])):
         gid,market_name,book,side,line,odds,quoted,_=key
         evidence=summarize(asof_grades(origin,observed,gid))
+        season_2026=evidence['by_season'].get('2026',{})
         gain=profit(odds)
         rate=evidence['cover_rate_excluding_pushes']
         ev=price_evidence(evidence,odds)
@@ -2605,10 +2827,12 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
             'break_even_excluding_pushes':1/(1+gain) if gain is not None else None,
             'historical_cover_rate':rate,'estimated_ev_per_unit':ev,
             'history':evidence,'grade_status':'GRADED' if ev is not None else 'NO_MATCHED_HISTORICAL_GRADES',
+            'saved_historical_games':len(grades[origin]),
+            'reconstructed_historical_games':len(reconstructed.get(origin,{})),
+            'eligible_2026_historical_games':sum(season_2026.values()),
             'bet_authority':0})
     # A combination must have exact same-side historical co-occurrences.
     # Keep one unambiguous system per distinct dependency and brain per quote.
-    from collections import defaultdict
     by_quote=defaultdict(list)
     for origin,key in picks:
         by_quote[key].append(origin)
@@ -2646,6 +2870,7 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
             '2026_status':extension_status,'2026_source':extension_uri or None,
             '2026_source_matched_system_games':sum(len(rows) for rows in extension.values()),
             '2026_conflicting_system_games_excluded':len(extension_conflicts),
+            'fixed_rule_history':replay,
             'historical_totals_source':totals_audit,'exact_combinations':combinations,
             'by_family':family_coverage,
             'conflicting_system_game_grades_excluded':len(conflicts),
