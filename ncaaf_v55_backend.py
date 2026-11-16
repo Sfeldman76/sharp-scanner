@@ -2446,21 +2446,29 @@ def read_current_other_market_quotes(bq_client, board_rows, *, now=None,
         'holds':dict(holds),'bet_authority':0}
 
 
-def _v55_historical_miner_open_totals(bq, games, native_ids, team_map):
-    """Read labeled opening totals from the original historical training view."""
+def _v55_historical_training_lines(bq, games, native_ids, team_map):
+    """Read explicitly labeled historical line references from the training view."""
     table='sharplogger.sharp_data.ncaaf_historical_core_training_vw'
     fields={f.name for f in bq.get_table(table).schema}
     id_fields=[c for c in ('Source_Game_ID','Game_Key','Game_ID') if c in fields]
-    line_fields=[c for c in ('Consensus_Open_Total','Opening_Total') if c in fields]
+    groups={
+        'opening_total':('Consensus_Open_Total','Opening_Total'),
+        'closing_spread':('Consensus_Close_Spread_Audit','Consensus_Close_Spread','Closing_Spread'),
+        'closing_total':('Consensus_Close_Total_Audit','Consensus_Close_Total','Closing_Total'),
+    }
+    line_fields=[c for columns in groups.values() for c in columns if c in fields]
     team_fields=['Canonical_Team_Norm','Opponent_Canonical_Team_Norm']
     if not id_fields or not line_fields or not {'Season',*team_fields}<=fields:
-        return {},{'status':'HISTORICAL_OPEN_TOTAL_COLUMNS_UNAVAILABLE','source':table}
+        return {},{'status':'HISTORICAL_TRAINING_LINE_COLUMNS_UNAVAILABLE','source':table}
     columns=','.join(f'`{c}`' for c in ['Season',*id_fields,*line_fields,*team_fields])
     rows=bq.query(f'SELECT {columns} FROM `{table}` '
                   'WHERE SAFE_CAST(Season AS INT64) BETWEEN 2013 AND 2025').result()
     seen=defaultdict(set)
     for row in rows:
-        year=int(row['Season'])
+        year=num(row['Season'])
+        if year is None or year!=int(year):
+            continue
+        year=int(year)
         candidates=set()
         for c in id_fields:
             raw=_v55_live_id(row[c])
@@ -2471,36 +2479,91 @@ def _v55_historical_miner_open_totals(bq, games, native_ids, team_map):
         if len(candidates)!=1:
             continue
         game=(year,next(iter(candidates)))
-        names={_v55_cfbd_school_key(row[c]) for c in team_fields}
-        sides=team_map[game]
-        aliases=[{_v55_cfbd_school_key(v) for v in (name,entry.get('source_team_label')) if v}
-                 for name,entry in sides.items()]
-        if len(names)!=2 or '' in names or any(len(names & a)!=1 for a in aliases) or not names<=set.union(*aliases):
+        if games[game].get('role_verification_status')!='HOME_AWAY_VERIFIED':
             continue
-        line=next((v for c in line_fields if (v:=num(row[c])) is not None),None)
-        if line is not None and 1<=line<=150:
-            seen[game].add(line)
-    opens={key:next(iter(lines)) for key,lines in seen.items() if len(lines)==1}
-    return opens,{'status':'HISTORICAL_OPEN_TOTALS_READ' if opens else 'NO_MATCHED_HISTORICAL_OPEN_TOTALS',
-                  'source':table,'games':len(opens),'conflicting_games':len(seen)-len(opens)}
+        names=[_v55_cfbd_school_key(row[c]) for c in team_fields]
+        sides=team_map[game]
+        roles=[]
+        for key in names:
+            matches=[s(entry.get('is_home_verified')) for name,entry in sides.items()
+                     if key and key in {_v55_cfbd_school_key(name),_v55_cfbd_school_key(entry.get('source_team_label'))}]
+            roles.append(matches[0] if len(matches)==1 else '')
+        if set(roles)!={'0','1'}:
+            continue
+        for kind,columns in groups.items():
+            line=next((v for c in columns if c in fields and (v:=num(row[c])) is not None),None)
+            if line is None:
+                continue
+            if kind=='closing_spread':
+                # Use the home-side row, whose spread uses the same sign
+                # convention as Opening_Spread in this view.
+                if roles[0]=='1' and abs(line)<=100:
+                    seen[(kind,game)].add(line)
+            elif 1<=line<=150:
+                seen[(kind,game)].add(line)
+    lines=defaultdict(dict)
+    for (kind,game),values in seen.items():
+        if len(values)==1:
+            lines[kind][game]=next(iter(values))
+    return dict(lines),{'status':'HISTORICAL_TRAINING_LINES_READ' if lines else 'NO_MATCHED_HISTORICAL_TRAINING_LINES',
+                        'source':table,'games_by_line':{k:len(v) for k,v in lines.items()},
+                        'conflicting_games_by_line':dict(Counter(k for (k,_),v in seen.items() if len(v)>1))}
 
 
-def _v55_replay_miner_history(bq, games, native_ids, team_map, rules, evaluate_atoms, grades, conflicts):
+def _v55_historical_grade_references(bq, canonical, games, native_ids, team_map, markets):
+    """Load outcome references without using fallback prices as rule inputs."""
+    import ncaaf_v55_research as research
+
+    sources={}
+    refs={'spreads':{},'totals':{}}
+    training={}
+    if bq is None or not set(refs)&markets:
+        return training,refs,sources
+    try:
+        training,sources['training_lines']=_v55_historical_training_lines(bq,games,native_ids,team_map)
+    except Exception as exc:
+        sources['training_lines']={'status':'HOLD_HISTORICAL_TRAINING_LINES','error':str(exc)[:200]}
+    manifest,sides,audit=canonical
+    read_args={'client':bq,'canonical_manifest':manifest,'canonical_sides':sides,'canonical_audit':audit}
+    try:
+        rows,sources['pregame_snapshots']=research.ml_historical_market_rows(**read_args)
+        for row in rows:
+            game=(row['season'],str(row['game_id']))
+            for mkt,field,low,high in (('spreads','spread_home_line',-100,100),('totals','total_over_line',1,150)):
+                line=num(row.get(field))
+                if mkt in markets and game in games and line is not None and low<=line<=high:
+                    refs[mkt][game]=(line,'HISTORICAL_PREGAME_SNAPSHOT')
+    except Exception as exc:
+        sources['pregame_snapshots']={'status':'HOLD_HISTORICAL_PREGAME_SNAPSHOTS','error':str(exc)[:200]}
+    for mkt,kind in (('spreads','closing_spread'),('totals','closing_total')):
+        if mkt in markets:
+            for game,line in training.get(kind,{}).items():
+                refs[mkt].setdefault(game,(line,'HISTORICAL_CLOSING_REFERENCE'))
+    if 'totals' in markets:
+        try:
+            rows,sources['archived_totals']=research.ml_archived_reference_line_rows(**read_args)
+            archived={}
+            for row in rows:
+                game=(row['season'],str(row['game_id']))
+                line=num(row.get('total_over_line_research'))
+                if game in games and line is not None and 1<=line<=150:
+                    archived[game]=line
+                    refs['totals'].setdefault(game,(line,'ARCHIVED_PROVIDER_TOTAL'))
+            # Retain the reference basis of already saved totals grades.
+            training['saved_total']=archived
+        except Exception as exc:
+            sources['archived_totals']={'status':'HOLD_ARCHIVED_TOTALS','error':str(exc)[:200]}
+    return training,refs,sources
+
+
+def _v55_replay_miner_history(bq, games, team_map, rules, evaluate_atoms, grades, conflicts,
+                              open_totals, grade_refs):
     """Fill game-level gaps using exact frozen rules and the live home-side inputs."""
     import numpy as np
     import pandas as pd
     from ncaaf_v55_research import grade
 
     coverage=Counter()
-    opens={}
-    totals_audit={}
-    if any(origin[2]=='totals' for origin in rules):
-        try:
-            opens,totals_audit=_v55_historical_miner_open_totals(bq,games,native_ids,team_map)
-        except Exception as exc:
-            totals_audit={'status':'HOLD_HISTORICAL_OPEN_TOTAL_SOURCE',
-                          'error':type(exc).__name__+':'+str(exc)[:200]}
-
     # The original Miner warehouse includes shifted pregame priors alongside
     # final stats. Select only prior columns, with the same field names as live.
     tables=('sharplogger.sharp_data.ncaaf_cfbd_miner_features_postgame_v1',
@@ -2580,7 +2643,7 @@ def _v55_replay_miner_history(bq, games, native_ids, team_map, rules, evaluate_a
         mirror=num(ar.get('retrospective_open_spread'))
         if spread is not None and (abs(spread)>100 or (mirror is not None and abs(spread+mirror)>1e-7)):
             spread=None
-        total=opens.get(game)
+        total=open_totals.get(game)
         inputs.append({**by_game.get(game,{}),'Season':year,'Game_Start':fixture.get('game_date'),
                        'Team_Norm':hr.get('source_team_label') or hk,'Opponent_Norm':ar.get('source_team_label') or ak})
         results.append((game,hk,ak,h,a,spread,total))
@@ -2601,7 +2664,8 @@ def _v55_replay_miner_history(bq, games, native_ids, team_map, rules, evaluate_a
                     continue
                 absent=sorted(set(rule['atoms'])-atoms.keys())
                 stats={'missing_atoms':absent,'rule_fires':0,'missing_result_line':0,
-                       'already_graded':0,'excluded_conflicts':0,'added_games_by_season':Counter()}
+                       'already_graded':0,'excluded_conflicts':0,'added_games_by_season':Counter(),
+                       'added_games_by_line_source':Counter(),'fallback_grades_by_season':Counter()}
                 rule_audit[origin[1]]=stats
                 if absent:
                     continue
@@ -2617,7 +2681,14 @@ def _v55_replay_miner_history(bq, games, native_ids, team_map, rules, evaluate_a
                         stats['already_graded']+=1
                         continue
                     side=('OVER' if on else 'UNDER') if mkt=='totals' else ('HOME' if on else 'AWAY')
-                    line=total if mkt=='totals' else spread if on or spread is None else -spread
+                    line=total if mkt=='totals' else spread
+                    line_source='HISTORICAL_OPENING_REFERENCE'
+                    if mkt=='h2h':
+                        line,line_source=None,'FINAL_SCORE'
+                    elif line is None:
+                        line,line_source=grade_refs[mkt].get(game,(None,''))
+                    if mkt=='spreads' and not on and line is not None:
+                        line=-line
                     outcome=grade(mkt,side,line,h,a)
                     if not outcome:
                         stats['missing_result_line']+=1
@@ -2625,12 +2696,15 @@ def _v55_replay_miner_history(bq, games, native_ids, team_map, rules, evaluate_a
                     target=side if mkt=='totals' else hk if on else ak
                     additions[origin][game]=(target,outcome)
                     stats['added_games_by_season'][str(game[0])]+=1
+                    stats['added_games_by_line_source'][line_source]+=1
+                    if line_source not in ('HISTORICAL_OPENING_REFERENCE','FINAL_SCORE'):
+                        stats['fallback_grades_by_season'][str(game[0])]+=1
     added=sum(map(len,additions.values()))
     return additions,{'status':'HISTORICAL_GAME_GRADES_ADDED' if added else 'NO_ADDITIONAL_HISTORICAL_GAME_GRADES',
                       'eligible_final_games_by_season':dict(Counter(str(row[0][0]) for row in results)),
                       'matched_prior_games_by_season':dict(Counter(str(year) for year,_ in by_game)),
                       'added_system_games':added,'by_rule':rule_audit,'historical_priors':source_audits,
-                      'historical_open_totals':totals_audit,'holds':dict(coverage),
+                      'holds':dict(coverage),
                       'history_type':'FIXED_RULE_RETROSPECTIVE_HOME_PERSPECTIVE','bet_authority':0}
 
 
@@ -2685,13 +2759,11 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
     origins={origin for origin,_ in picks}
     grades={origin:{} for origin in origins}
     conflicts=set()
-    totals={}
-    totals_audit={'status':'NO_TOTALS_PICKS'}
-    if bq_client is not None and any(origin[2]=='totals' for origin in origins):
-        refs,totals_audit=research.ml_archived_reference_line_rows(
-            client=bq_client,canonical_manifest=manifest,canonical_sides=sides,canonical_audit=audit)
-        totals={(r['season'],r['game_id']):r['total_over_line_research'] for r in refs
-                if r.get('total_over_line_research') is not None}
+    training_lines,grade_refs,grade_sources=_v55_historical_grade_references(
+        bq_client,(manifest,sides,audit),games,native_ids,team_map,{origin[2] for origin in origins})
+    opening_totals=training_lines.get('opening_total',{})
+    saved_totals=training_lines.get('saved_total',{})
+    saved_line_fallbacks={}
     history=research._obj_bytes(history_uri,gcs)
     for raw in history.splitlines():
         if not raw.strip():
@@ -2708,13 +2780,21 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
             continue
         selected=row.get('target')
         game_sides=team_map.get(game,{})
+        line_source=None
         if origin[2]=='totals':
             side=next(iter(game_sides.values()),{})
-            outcome=research.grade('totals',selected,totals.get(game),
+            line=saved_totals.get(game,opening_totals.get(game))
+            if line is None:
+                line,line_source=grade_refs['totals'].get(game,(None,None))
+            outcome=research.grade('totals',selected,line,
                                   side.get('team_score'),side.get('opponent_score'))
         else:
             side=game_sides.get(selected,{})
-            line=side.get('retrospective_open_spread') if origin[2]=='spreads' else None
+            line=num(side.get('retrospective_open_spread')) if origin[2]=='spreads' else None
+            if origin[2]=='spreads' and line is None and s(side.get('is_home_verified')) in ('0','1'):
+                line,line_source=grade_refs['spreads'].get(game,(None,None))
+                if line is not None and s(side.get('is_home_verified'))=='0':
+                    line=-line
             outcome=research.grade(origin[2],'HOME',line,side.get('team_score'),
                                   side.get('opponent_score'))
         if not outcome:
@@ -2723,6 +2803,8 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
         if game in grades[origin] and grades[origin][game]!=entry:
             conflicts.add((origin,game))
         grades[origin][game]=entry
+        if line_source:
+            saved_line_fallbacks[(origin,game)]=line_source
 
     replay={'status':'NO_CURRENT_MINER_LIBRARY_PICKS','bet_authority':0}
     reconstructed={}
@@ -2740,7 +2822,7 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
                 replay={'status':'NO_EXACT_FROZEN_LIBRARY_MATCH','bet_authority':0}
                 if rules:
                     reconstructed,replay=_v55_replay_miner_history(
-                        bq_client,games,native_ids,team_map,rules,evaluate_atoms,grades,conflicts)
+                        bq_client,games,team_map,rules,evaluate_atoms,grades,conflicts,opening_totals,grade_refs)
                 replay.update(library_uri=uri,library_sha256=digest,matched_rule_count=len(rules),
                               unmatched_rule_ids=sorted(origin[1] for origin in miner_definitions.keys()-rules.keys()))
             except Exception as exc:
@@ -2871,7 +2953,11 @@ def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
             '2026_source_matched_system_games':sum(len(rows) for rows in extension.values()),
             '2026_conflicting_system_games_excluded':len(extension_conflicts),
             'fixed_rule_history':replay,
-            'historical_totals_source':totals_audit,'exact_combinations':combinations,
+            'historical_totals_source':grade_sources.get('archived_totals',{}),
+            'historical_grade_line_sources':grade_sources,
+            'saved_historical_grades_using_fallback':dict(Counter(
+                source for key,source in saved_line_fallbacks.items() if key not in conflicts)),
+            'exact_combinations':combinations,
             'by_family':family_coverage,
             'conflicting_system_game_grades_excluded':len(conflicts),
             'picks':result,'bet_authority':0}
