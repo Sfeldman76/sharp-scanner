@@ -328,6 +328,7 @@ def _v55_live_audit_latest_spread_quotes(bq, table, *, now, horizon_days):
 
     # The board's existing fixture join and same-book pair checks select the
     # newest verified spread pair from the recorded sportsbook observations.
+    # BigQuery window partitions require an exact type for the spread key.
     query = f"""
         SELECT Game_Start, Home_Team_Norm, Away_Team_Norm, Outcome, Outcome_Norm,
                Value, Odds_Price, Bookmaker, Book, Snapshot_Timestamp, Game_Key
@@ -343,7 +344,7 @@ def _v55_live_audit_latest_spread_quotes(bq, table, *, now, horizon_days):
           PARTITION BY Game_Start, Home_Team_Norm, Away_Team_Norm,
                        COALESCE(NULLIF(TRIM(Bookmaker), ''), TRIM(Book)),
                        COALESCE(NULLIF(TRIM(Outcome), ''), TRIM(Outcome_Norm)),
-                       SAFE_CAST(Value AS FLOAT64)
+                       SAFE_CAST(Value AS NUMERIC)
           ORDER BY Snapshot_Timestamp DESC
         ) = 1
     """
