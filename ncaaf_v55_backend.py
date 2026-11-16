@@ -186,7 +186,7 @@ def signals_by_side(events,boards,quotes,at):
     origins=defaultdict(dict);rejected=Counter()
     bmap={s(r.get('Game_ID') or r.get('game_id')):r for r in boards}
     for e in events:
-        if e.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
+        if e.get('producer') in (V55_RECOVERED_MARKET_PRODUCER,V55_LIBRARY_MINER_PRODUCER):
             rejected['SHADOW_ONLY_MARKET_RULE']+=1;continue
         gid=s(e.get('game_id') or e.get('Game_ID'))
         f=family(e.get('source_family') or e.get('Source_Family'))
@@ -1001,8 +1001,9 @@ def read_original_live_signals_from_bq(bq_client,table_id,*,now=None):
 # Unified live signal ingestion: original observations ONLY. This is a source
 # connector, not a seventh competing decision/prediction engine.
 SEVEN_BRAIN_MANIFEST_SCHEMA='NCAAF_V55_SEVEN_BRAIN_LIVE_SOURCES_V1'
+V55_DEFAULT_LIVE_MANIFEST_KEY='research/ncaaf/v55/live/seven_brain_sources_verified_auto_v1.json'
 
-def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
+def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None, storage_client=None):
     """Read every configured brain's original directional observations.
 
     Individual brains may originate with no CORE selection. Missing families
@@ -1011,7 +1012,11 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
     live observations. The source manifest must itself be explicitly supplied.
     """
     at=now or datetime.now(timezone.utc)
-    manifest=read_registry(manifest_uri)
+    if storage_client is not None and manifest_uri.startswith('gs://'):
+        manifest_bucket,manifest_key=manifest_uri[5:].split('/',1)
+        manifest=json.loads(storage_client.bucket(manifest_bucket).blob(manifest_key).download_as_bytes())
+    else:
+        manifest=read_registry(manifest_uri)
     if not isinstance(manifest,dict) or manifest.get('schema')!=SEVEN_BRAIN_MANIFEST_SCHEMA:
         raise ValueError('INVALID_SEVEN_BRAIN_SOURCE_MANIFEST_SCHEMA')
     sources=manifest.get('sources')
@@ -1037,7 +1042,17 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
             if uri.startswith('bq://'):
                 rows=read_original_live_signals_from_bq(bq_client,uri[5:],now=at)
             else:
-                rows=read_rows(uri)
+                if storage_client is not None:
+                    source_bucket,source_key=uri[5:].split('/',1)
+                    payload=storage_client.bucket(source_bucket).blob(source_key).download_as_bytes()
+                    if source_key.lower().endswith('.csv'):
+                        rows=list(csv.DictReader(io.StringIO(payload.decode('utf-8-sig'))))
+                    else:
+                        payload=payload.lstrip()
+                        rows=(json.loads(payload) if payload.startswith(b'[') else
+                              [json.loads(line) for line in payload.splitlines() if line.strip()])
+                else:
+                    rows=read_rows(uri)
             if not isinstance(rows,list):raise ValueError('SIGNALS_NOT_A_LIST')
             accepted=0;rejected=Counter()
             for e in rows:
@@ -1076,7 +1091,14 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
                           s(e.get('line') if 'line' in e else e.get('Observed_Spread')),
                           evtime.isoformat(),quote_time.isoformat(),capture)
                 if identity in dedup:rejected['DUPLICATE_OBSERVATION']+=1;continue
-                dedup.add(identity);records.append(dict(e));accepted+=1;by_family[reported]+=1
+                dedup.add(identity)
+                records.append(dict(e,game_id=gid,source_family=reported,system_id=sid,
+                    market=emarket,side=eside.upper(),book=ebook.lower(),line=eline,
+                    odds=num(e.get('odds',e.get('Observed_Odds_American'))),
+                    kickoff_utc=kickoff.isoformat(),quote_observed_at_utc=quote_time.isoformat(),
+                    signal_observed_at_utc=evtime.isoformat(),signal_capture_ref=capture,
+                    direction_verified=True,evidence_family_key=dep,frozen_definition_sha256=def_hash))
+                accepted+=1;by_family[reported]+=1
             source_results.append({'family':fam,'uri':uri,'source_rows':len(rows),
                                    'accepted_original_events':accepted,'rejected':dict(rejected)})
         except Exception as exc:
@@ -1287,7 +1309,7 @@ V55_HISTORY_MIN_DECISIONS = 12
 V55_HISTORY_MIN_SEASONS = 3
 
 
-def v55_full_history_statistical_screen(by_season):
+def v55_full_history_statistical_screen(by_season, *, last_season=2025):
     """Descriptive 2013–2025 screen; NOT an independently selected OOS test.
 
     Use every distinct game/side observation across seasons, not a universal
@@ -1298,7 +1320,7 @@ def v55_full_history_statistical_screen(by_season):
     for sy, rec in (by_season or {}).items():
         try:
             y=int(sy)
-            if not 2013<=y<=2025:continue
+            if not 2013<=y<=last_season:continue
             w=int(rec['wins']);l=int(rec['losses']);p=int(rec.get('pushes',0))
             if min(w,l,p)<0:raise ValueError('negative')
             years[y]={'wins':w,'losses':l,'pushes':p}
@@ -1309,7 +1331,9 @@ def v55_full_history_statistical_screen(by_season):
     losses=sum(v['losses'] for v in years.values())
     n=wins+losses
     observed=[y for y,v in years.items() if v['wins']+v['losses']>0]
-    result={'policy':V55_HISTORY_SCREEN_POLICY,'decisive_n':n,'wins':wins,'losses':losses,
+    policy=(V55_HISTORY_SCREEN_POLICY if last_season==2025 else
+            'V55-2013-2026-POOLED-ASOF-BETA11-80PCT-RESEARCH')
+    result={'policy':policy,'decisive_n':n,'wins':wins,'losses':losses,
         'participating_seasons':len(observed),'observed_seasons':sorted(observed),
         'min_decisions':V55_HISTORY_MIN_DECISIONS,'min_seasons':V55_HISTORY_MIN_SEASONS,
         'posterior_threshold':0.80,'baseline_rate':0.50,
@@ -1488,9 +1512,7 @@ def produce_v55_full_history_miner(board, feature_rows, qualified_registry, *,
         'bet_authority':0}
     if not rules:return [],audit
     if (qualified_registry or {}).get('historical_screen_only'):
-        return produce_v55_recovered_market_shadow(
-            board,qualified_registry,storage_client=storage_client,
-            bucket=bucket,now=at)
+        return [],{**audit,'status':'USE_PUBLISHED_MINER_LIBRARY'}
     if hasattr(board,'to_dict'):board=board.to_dict('records')
     byid={s(r.get('Game_ID') or r.get('game_id')):r for r in board}
     oriented=[]
@@ -1705,6 +1727,214 @@ def connect_v55_existing_historical_rules(storage_client, bucket, *, now=None):
 
 
 V55_RECOVERED_MARKET_PRODUCER = 'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW'
+V55_LIBRARY_MINER_PRODUCER = 'V55_FROZEN_LIBRARY_MARKET_SHADOW'
+
+
+def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days):
+    """Find the published opener on the exact current scanner quote."""
+    from google.cloud import bigquery
+    from ncaaf_v55_board import _norm_team
+
+    table='sharplogger.sharp_data.moves_with_features_merged'
+    fields={f.name for f in bq_client.get_table(table).schema}
+    required={'Game_Start','Home_Team_Norm','Away_Team_Norm','Sport','Market',
+              'Outcome','Snapshot_Timestamp','Value','Odds_Price','Open_Value'}
+    if not required.issubset(fields):
+        return {},{'status':'SOURCE_FIELDS_MISSING','missing_fields':sorted(required-fields)}
+    book_cols=[k for k in ('Bookmaker','Book') if k in fields]
+    if not book_cols:
+        return {},{'status':'SOURCE_BOOK_FIELD_MISSING'}
+    book_sql='COALESCE('+','.join(f"NULLIF(LOWER(TRIM(CAST(`{k}` AS STRING))), '')"
+                                  for k in book_cols)+",'')"
+    quoted=[clock(q.get('quote_observed_at_utc')) for q in quotes]
+    quoted=[ts for ts in quoted if ts]
+    if not quoted:
+        return {},{'status':'NO_VERIFIED_QUOTES'}
+    cfg=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter('now','TIMESTAMP',now),
+        bigquery.ScalarQueryParameter('first','TIMESTAMP',min(quoted)),
+        bigquery.ScalarQueryParameter('days','INT64',horizon_days)])
+    sql=f"""SELECT Game_Start, Home_Team_Norm, Away_Team_Norm, Market, Outcome,
+                    Snapshot_Timestamp, Value, Odds_Price, Open_Value, {book_sql} AS book
+             FROM `{table}`
+             WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
+               AND LOWER(TRIM(CAST(Market AS STRING))) IN ('spreads','spread','totals','total')
+               AND Game_Start > @now AND Game_Start <= TIMESTAMP_ADD(@now, INTERVAL @days DAY)
+               AND Snapshot_Timestamp BETWEEN @first AND @now AND Open_Value IS NOT NULL"""
+    fixtures={s(r.get('Game_ID')):(_norm_team(r.get('Home_Team')),
+                                   _norm_team(r.get('Away_Team'))) for r in board}
+    wanted={}
+    for q in quotes:
+        m=market(q.get('market'))
+        side=s(q.get('side')).upper()
+        gid=s(q.get('game_id'))
+        if gid not in fixtures or (m,side) not in (('spreads','HOME'),('totals','OVER')):
+            continue
+        key=(gid,m,q['book'],q['line'],q['odds'],clock(q['quote_observed_at_utc']),
+             clock(q['kickoff_utc']))
+        home,away=fixtures[gid]
+        wanted[(home,away,m,home if m=='spreads' else 'OVER',*key[2:])]=key
+    candidates=defaultdict(set)
+    for row in bq_client.query(sql,job_config=cfg).result():
+        m=market(row['Market'])
+        side=_norm_team(row['Outcome']) if m=='spreads' else s(row['Outcome']).upper().split()[0] if s(row['Outcome']) else ''
+        key=(_norm_team(row['Home_Team_Norm']),_norm_team(row['Away_Team_Norm']),m,side,
+             row['book'],num(row['Value']),num(row['Odds_Price']),clock(row['Snapshot_Timestamp']),
+             clock(row['Game_Start']))
+        opener=num(row['Open_Value'])
+        if key in wanted and opener is not None:
+            candidates[wanted[key]].add(opener)
+    matched={key:next(iter(lines)) for key,lines in candidates.items() if len(lines)==1}
+    return matched,{'status':'PASS' if matched else 'NO_EXACT_PUBLISHED_OPENERS',
+                    'matched_quotes':len(matched),
+                    'conflicting_openers':sum(len(lines)>1 for lines in candidates.values())}
+
+
+def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
+                                 bq_client=None, horizon_days=7, now=None):
+    """Evaluate the published full-history library with its pinned atom provider."""
+    import ast
+    import inspect
+    import pandas as pd
+    import ncaaf_research_v2 as miner
+
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    root='research/ncaaf/v55/unified_executable_miner_library_v2/'
+    protocol='V55-EXECUTABLE-UNIFIED-FULL-HISTORY-2013-2025-R2'
+    storage=storage_client.bucket(bucket)
+    pointer=json.loads(storage.blob(root+'current_library.json').download_as_bytes())
+    uri=s(pointer.get('latest_uri'))
+    prefix='gs://'+bucket+'/'
+    if (pointer.get('schema')!=protocol or pointer.get('bet_authority')!=0
+            or not uri.startswith(prefix+root+'runs/') or not uri.endswith('/library.json')):
+        raise ValueError('INVALID_PUBLISHED_MINER_LIBRARY_POINTER')
+    raw=storage.blob(uri[len(prefix):]).download_as_bytes()
+    digest=hashlib.sha256(raw).hexdigest()
+    library=json.loads(raw)
+    rules=library['rules']
+    markets=('spreads','h2h','totals')
+    counts={m:sum(r.get('market')==m for r in rules) for m in markets}
+    if (digest!=pointer.get('sha256') or library.get('schema')!=protocol
+            or library.get('bet_authority')!=0 or len(rules)!=pointer.get('rule_count')
+            or not rules or sum(counts.values())!=len(rules) or counts!=pointer.get('market_counts')
+            or len({r['rule_id'] for r in rules})!=len(rules)):
+        raise ValueError('PUBLISHED_MINER_LIBRARY_INTEGRITY_FAILURE')
+    provider_source=inspect.getsource(miner._extended_atoms)
+    function=ast.parse(provider_source).body[0]
+    provider_hash=hashlib.sha256(ast.get_source_segment(provider_source,function).encode()).hexdigest()
+    if provider_hash!=library.get('atom_provider_sha256'):
+        raise ValueError('LIVE_ATOM_PROVIDER_DEFINITION_DRIFT')
+    for rule in rules:
+        identity=(rule['market'],rule['direction'],tuple(sorted(rule['atoms'])))
+        rule_id='UNIFIED-'+hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24].upper()
+        if (rule_id!=rule['rule_id'] or not rule['atoms'] or rule['direction'] not in ('PLAY_ON','FADE')
+                or rule.get('live_authority_eligible') is not False or rule.get('legacy_incumbent') is not False):
+            raise ValueError('INVALID_FROZEN_MINER_RULE:'+rule['rule_id'])
+
+    board_rows=board.to_dict('records') if hasattr(board,'to_dict') else board
+    fixtures={s(r.get('Game_ID')):r for r in board_rows}
+    features={s(r.get('game_id')):r for r in feature_rows}
+    paired,holds=v55_validate_shadow_quote_pairs(quotes)
+    books=defaultdict(dict)
+    for q in paired:
+        quoted,kick=clock(q.get('quote_observed_at_utc')),clock(q.get('kickoff_utc'))
+        if quoted and kick and quoted<=at<kick:
+            books[(q['game_id'],q['market'],q['book'])][q['side']]=q
+    # Use one complete pair per game/market. Keep the original HOME/OVER
+    # perspective used by the historical evaluator across every market.
+    pairs={}
+    for (gid,mkt,book),sides in books.items():
+        if len(sides)!=2 or gid not in fixtures:
+            continue
+        stamp=min(clock(q['quote_observed_at_utc']) for q in sides.values())
+        key=(gid,mkt)
+        if key not in pairs or (stamp,book)>pairs[key][0]:
+            pairs[key]=((stamp,book),sides)
+
+    prior,_=read_recent_v55_prospective_captures(storage_client,bucket,now=at,
+                                                include_reference_quotes=True)
+    prior_ids={r['capture_id'] for r in prior}
+    audit={'status':'EVALUATED_PUBLISHED_MINER_LIBRARY','library_uri':uri,
+           'library_sha256':digest,'rule_count':len(rules),'market_counts':counts,
+           'by_market':{},'pair_holds':dict(holds),'bet_authority':0}
+    prepared=[]
+    openers={}
+    if bq_client is not None:
+        try:
+            openers,audit['opening_quotes']=v55_observed_openers(
+                bq_client,board_rows,paired,now=at,horizon_days=horizon_days)
+        except Exception as exc:
+            audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
+                                     'error':type(exc).__name__+':'+str(exc)[:200]}
+    for mkt in markets:
+        market_rules=[r for r in rules if r['market']==mkt]
+        stats={'rules':len(market_rules),'source_games':0,'fired':0,'not_met':0,
+               'missing_inputs':0,'already_captured':0}
+        audit['by_market'][mkt]=stats
+        missing=Counter()
+        for (gid,game_market),(_,sides) in pairs.items():
+            if game_market!=mkt:
+                continue
+            fixture=fixtures[gid]
+            source=features.get(gid,{})
+            source_time=clock(source.get('feature_asof_utc'))
+            base=sides['OVER' if mkt=='totals' else 'HOME']
+            kickoff=clock(base['kickoff_utc'])
+            home_priors=(source.get('team_side_features') or {}).get('HOME',{})
+            row={k:v for k,v in home_priors.items() if num(v) is not None} if (
+                source_time and source_time<=at<kickoff) else {}
+            row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
+                       Season=fixture.get('Season'),Week=fixture.get('Week'),
+                       Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
+            if mkt=='spreads':
+                row['Current_Spread']=base['line']
+            elif mkt=='totals':
+                row['Current_Total']=base['line']
+            opener=openers.get((gid,mkt,base['book'],base['line'],base['odds'],
+                                clock(base['quote_observed_at_utc']),kickoff))
+            if opener is not None and mkt in ('spreads','totals'):
+                row['Opening_Spread' if mkt=='spreads' else 'Opening_Total']=opener
+            # Do not map current quotes into opening fields. Venue atoms
+            # require a verified site role, which this fixture feed lacks.
+            atoms={r['name']:bool(r['mask'][0]) for r in miner._extended_atoms(
+                pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
+                market=mkt,enforce_support_floor=False)}
+            stats['source_games']+=1
+            for rule in market_rules:
+                unavailable=[name for name in rule['atoms'] if name not in atoms]
+                if unavailable:
+                    stats['missing_inputs']+=1
+                    missing.update(unavailable)
+                    continue
+                if not all(atoms[name] for name in rule['atoms']):
+                    stats['not_met']+=1
+                    continue
+                target=('OVER' if rule['direction']=='PLAY_ON' else 'UNDER') if mkt=='totals' else (
+                    'HOME' if rule['direction']=='PLAY_ON' else 'AWAY')
+                q=sides[target]
+                exact=(gid,mkt,target,q['book'],q['line'],q['odds'],q['quote_observed_at_utc'],
+                       q['kickoff_utc'],rule['rule_id'])
+                cid=sha((V55_LIBRARY_MINER_PRODUCER,digest,exact))
+                stats['fired']+=1
+                if cid in prior_ids:
+                    stats['already_captured']+=1
+                    continue
+                dep='SYSTEM_MINER|FROZEN_V5_SHARED_DISCOVERY'
+                quote_fields={k:q[k] for k in ('game_id','market','side','book','line','odds',
+                                               'quote_observed_at_utc','kickoff_utc')}
+                prepared.append({**quote_fields,'source_family':'SYSTEM_MINER','system_id':rule['rule_id'],
+                    'evidence_family_key':dep,'independence_group':dep,
+                    'frozen_definition_sha256':sha((digest,rule['rule_id'])),
+                    'rule_registry_sha256':digest,'signal_observed_at_utc':at.isoformat(),
+                    'direction_verified':True,'original_event_created_prospectively':True,
+                    'prospective_evaluation_after_quote':True,'producer':V55_LIBRARY_MINER_PRODUCER,
+                    'quote_capture_ref':q.get('quote_capture_ref') or
+                        'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(exact[:-1]),
+                    'qualification_level':'HISTORICAL_SCREEN_ONLY','capture_id':cid,'bet_authority':0})
+        stats['missing_atoms']=dict(missing)
+    captured,capture_audit=persist_v55_prospective_events(prepared,storage_client,bucket,now=at)
+    audit['capture']=capture_audit
+    return captured,audit
 
 
 def produce_v55_recovered_market_shadow(board, historical_registry, *,
@@ -2104,7 +2334,7 @@ def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
             quote_ref=s(ev.get('quote_capture_ref'))
             ident=s(ev.get('capture_id'))
             reference_quote=(include_reference_quotes and
-                ev.get('producer')==V55_RECOVERED_MARKET_PRODUCER and
+                ev.get('producer')==V55_LIBRARY_MINER_PRODUCER and
                 ev.get('qualification_level')=='HISTORICAL_SCREEN_ONLY' and
                 ev.get('bet_authority')==0 and fam=='SYSTEM_MINER')
             if (fam not in BRAINS or not ident or capture!=uri+'#'+ident
@@ -2208,6 +2438,218 @@ def read_current_other_market_quotes(bq_client, board_rows, *, now=None,
         'read_source_rows':len(raw),'paired_quote_rows':len(result),
         'market_counts':dict(Counter(x['market'] for x in result)),
         'holds':dict(holds),'bet_authority':0}
+
+
+def grade_v55_live_picks_from_history(gcs, bucket, signals, verified_quotes, *,
+                                       bq_client=None):
+    """Price current captured systems using their existing canonical game grades."""
+    import ncaaf_v55_research as research
+
+    def quote_key(row):
+        return (str(row.get('game_id') or ''), market(row.get('market')),
+                str(row.get('book') or '').lower(), str(row.get('side') or '').upper(),
+                num(row.get('line')), num(row.get('odds')),
+                clock(row.get('quote_observed_at_utc')),
+                clock(row.get('kickoff_utc')))
+
+    current_quotes={quote_key(row) for row in verified_quotes}
+    picks={}
+    dependencies={}
+    quote_sides={}
+    for event in signals:
+        if event.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
+            continue
+        key=quote_key(event)
+        origin=(family(event.get('source_family')),
+                str(event.get('system_id') or ''),key[1])
+        pick=(origin,key)
+        observed=clock(event.get('signal_observed_at_utc'))
+        if (key not in current_quotes or origin[0] not in BRAINS or not origin[1]
+                or not observed or not key[6] or not key[7] or observed>=key[7]
+                or not truth(event.get('direction_verified'))
+                or not (event.get('signal_capture_ref') or event.get('source_capture_ref'))):
+            continue
+        if pick not in picks or observed<picks[pick]:
+            picks[pick]=observed
+        dependencies.setdefault(pick,set()).add(
+            str(event.get('independence_group') or event.get('evidence_family_key') or ''))
+        quote_sides.setdefault((key[0], key[1]),set()).add(key[3])
+    if not picks:
+        return {'status':'NO_CURRENT_CAPTURED_PICKS_WITH_EXACT_VERIFIED_QUOTE','picks':[]}
+
+    root=f'gs://{bucket}/research/ncaaf/v55/'
+    canonical=root+'canonical_stage1/v5_2/'
+    history_uri=root+'two_engine_roi/frozen_brain_canonical_events_latest.jsonl'
+    manifest,sides,audit=(research._obj_bytes(canonical+name,gcs) for name in (
+        'historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
+        'stage1_canonical_ledger_v5_audit.json'))
+    _,games,_,team_map,_=research._checked_canonical(manifest,sides,audit)
+    origins={origin for origin,_ in picks}
+    grades={origin:{} for origin in origins}
+    conflicts=set()
+    totals={}
+    totals_audit={'status':'NO_TOTALS_PICKS'}
+    if bq_client is not None and any(origin[2]=='totals' for origin in origins):
+        refs,totals_audit=research.ml_archived_reference_line_rows(
+            client=bq_client,canonical_manifest=manifest,canonical_sides=sides,canonical_audit=audit)
+        totals={(r['season'],r['game_id']):r['total_over_line_research'] for r in refs
+                if r.get('total_over_line_research') is not None}
+    history=research._obj_bytes(history_uri,gcs)
+    for raw in history.splitlines():
+        if not raw.strip():
+            continue
+        row=json.loads(raw)
+        origin=(row.get('brain'),row.get('system_id'),row.get('market'))
+        if origin not in origins:
+            continue
+        year=int(row['season'])
+        game=(year,str(row['cfbd_game_id']))
+        # The Stage 1 historical ledger is a retrospective source. Any future
+        # 2026 extension needs a verified final-availability time per game.
+        if not 2013<=year<=2025 or game not in games:
+            continue
+        selected=row.get('target')
+        game_sides=team_map.get(game,{})
+        if origin[2]=='totals':
+            side=next(iter(game_sides.values()),{})
+            outcome=research.grade('totals',selected,totals.get(game),
+                                  side.get('team_score'),side.get('opponent_score'))
+        else:
+            side=game_sides.get(selected,{})
+            line=side.get('retrospective_open_spread') if origin[2]=='spreads' else None
+            outcome=research.grade(origin[2],'HOME',line,side.get('team_score'),
+                                  side.get('opponent_score'))
+        if not outcome:
+            continue
+        entry=(selected,outcome)
+        if game in grades[origin] and grades[origin][game]!=entry:
+            conflicts.add((origin,game))
+        grades[origin][game]=entry
+
+    # The next-season captures use the same frozen IDs as the archive. Only an
+    # independently observed final timestamp can make one eligible at pick time.
+    extension_uri=os.getenv('NCAAF_V55_GRADED_2026_EVENTS_URI','').strip()
+    extension={origin:{} for origin in origins}
+    extension_conflicts=set()
+    extension_status='NOT_CONFIGURED'
+    if extension_uri:
+        for row in read_rows(extension_uri):
+            origin=(family(row.get('source_family')),str(row.get('system_id') or ''),
+                    market(row.get('market')))
+            gid=_v55_live_id(row.get('cfbd_game_id') or row.get('game_id'))
+            kick=clock(row.get('kickoff_utc'))
+            observed=clock(row.get('signal_observed_at_utc'))
+            quoted=clock(row.get('quote_observed_at_utc'))
+            final=clock(row.get('final_observed_at_utc'))
+            side=str(row.get('side') or '').upper()
+            if (origin not in origins or str(row.get('season'))!='2026' or not gid
+                    or not all((kick,observed,quoted,final)) or max(observed,quoted)>=kick or kick>=final
+                    or not all(row.get(k) is True for k in (
+                        'original_pregame_signal_verified','original_pregame_quote_verified','final_score_verified'))
+                    or not all(row.get(k) for k in ('signal_capture_ref','quote_capture_ref','final_score_ref'))):
+                continue
+            target=side if origin[2]=='totals' else str(row.get('selected_team_key') or '').strip()
+            outcome=research.grade(origin[2],side,row.get('line'),row.get('home_score'),row.get('away_score'))
+            if not target or not outcome:
+                continue
+            entry=(target,outcome,final)
+            existing=extension[origin].get(gid)
+            if existing and existing[:2]!=entry[:2]:
+                extension_conflicts.add((origin,gid))
+            if existing is None or final<existing[2]:
+                extension[origin][gid]=entry
+        extension_status='SOURCE_READ'
+
+    def summarize(history_by_game):
+        counts={}
+        for year,_ in history_by_game:
+            counts.setdefault(str(year),Counter())
+        for (year,_),(_,outcome) in history_by_game.items():
+            counts[str(year)][outcome]+=1
+        yearly={year:{'wins':c['WIN'],'losses':c['LOSS'],'pushes':c['PUSH']}
+                for year,c in sorted(counts.items())}
+        screen=v55_full_history_statistical_screen(yearly,last_season=2026)
+        wins,losses=screen['wins'],screen['losses']
+        return {'by_season':yearly,'wins':wins,'losses':losses,
+            'pushes':sum(c['pushes'] for c in yearly.values()),
+            'cover_rate_excluding_pushes':wins/(wins+losses) if wins+losses else None,
+            'stability_posterior_above_50pct':screen['posterior_prob'],
+            'stability_pass':screen['pass']}
+
+    for origin,history_by_game in grades.items():
+        for game in list(history_by_game):
+            if (origin,game) in conflicts:
+                del history_by_game[game]
+
+    def asof_grades(origin, observed, current_gid):
+        return {**grades[origin],**{
+            (2026,gid):(target,outcome) for gid,(target,outcome,final) in extension[origin].items()
+            if gid!=current_gid and final<=observed and (origin,gid) not in extension_conflicts}}
+
+    def price_evidence(evidence, odds):
+        gain=profit(odds)
+        n=evidence['wins']+evidence['losses']+evidence['pushes']
+        return ((evidence['wins']*gain-evidence['losses'])/n
+                if n and gain is not None else None)
+
+    result=[]
+    for (origin,key),observed in sorted(picks.items(),key=lambda item:str(item[0])):
+        gid,market_name,book,side,line,odds,quoted,_=key
+        evidence=summarize(asof_grades(origin,observed,gid))
+        gain=profit(odds)
+        rate=evidence['cover_rate_excluding_pushes']
+        ev=price_evidence(evidence,odds)
+        result.append({'game_id':gid,'market':market_name,'side':side,'book':book,
+            'line':line,'odds':odds,'source_family':origin[0],'system_id':origin[1],
+            'observed_at_utc':observed.isoformat(),'quote_observed_at_utc':quoted.isoformat(),
+            'break_even_excluding_pushes':1/(1+gain) if gain is not None else None,
+            'historical_cover_rate':rate,'estimated_ev_per_unit':ev,
+            'history':evidence,'grade_status':'GRADED' if ev is not None else 'NO_MATCHED_HISTORICAL_GRADES',
+            'bet_authority':0})
+    # A combination must have exact same-side historical co-occurrences.
+    # Keep one unambiguous system per distinct dependency and brain per quote.
+    from collections import defaultdict
+    by_quote=defaultdict(list)
+    for origin,key in picks:
+        by_quote[key].append(origin)
+    combinations=[]
+    for key,components in by_quote.items():
+        gid,market_name,book,side,line,odds,quoted,_=key
+        if len(components)<2 or len(quote_sides[(gid,market_name)])!=1:
+            continue
+        dep=[dependencies[(origin,key)] for origin in components]
+        if (len({o[0] for o in components})!=len(components)
+                or any(len(d)!=1 or '' in d for d in dep)
+                or len(set().union(*dep))!=len(components)):
+            continue
+        components=sorted(components)
+        observed=max(picks[(origin,key)] for origin in components)
+        evidence_sets=[asof_grades(origin,observed,gid) for origin in components]
+        first=evidence_sets[0]
+        shared={game:entry for game,entry in first.items()
+                if all(group.get(game)==entry for group in evidence_sets[1:])}
+        evidence=summarize(shared)
+        combinations.append({'game_id':gid,'market':market_name,'book':book,'side':side,
+            'line':line,'odds':odds,'quote_observed_at_utc':quoted.isoformat(),
+            'components':components,'history':evidence,
+            'estimated_ev_per_unit':price_evidence(evidence,odds),'bet_authority':0})
+    graded_picks=sum(row['grade_status']=='GRADED' for row in result)
+    family_coverage={fam:{'exact_current_picks':sum(r['source_family']==fam for r in result),
+                          'graded_current_picks':sum(r['source_family']==fam and r['grade_status']=='GRADED'
+                                                     for r in result)} for fam in sorted(BRAINS)}
+    return {'status':('GRADED_AVAILABLE_CANONICAL_HISTORY' if graded_picks
+                      else 'HOLD_NO_MATCHED_HISTORICAL_GRADES'),
+            'graded_picks':graded_picks,'history_uri':history_uri,
+            'history_sha256':hashlib.sha256(history).hexdigest(),
+            'requested_seasons':list(range(2013,2027)),
+            'canonical_archive_seasons':sorted({year for year,_ in games}),
+            '2026_status':extension_status,'2026_source':extension_uri or None,
+            '2026_source_matched_system_games':sum(len(rows) for rows in extension.values()),
+            '2026_conflicting_system_games_excluded':len(extension_conflicts),
+            'historical_totals_source':totals_audit,'exact_combinations':combinations,
+            'by_family':family_coverage,
+            'conflicting_system_game_grades_excluded':len(conflicts),
+            'picks':result,'bet_authority':0}
 
 
 def seven_brain_live_combination_audit(signals, *, max_examples=150):
@@ -2314,7 +2756,7 @@ def read_current_cfbd_fixture_slate(bq_client, *, now=None, horizon_days=14):
                 'original_kickoff_utc':original_kickoff.isoformat(),
                 'corrected_kickoff_utc':ht.isoformat(),'source':'WYOMING_ATHLETICS'})
         fixtures.append({'Game_ID':gid,'CFBD_Game_ID':gid,'Season':int(num(h.get('Season'))),
-            'Game_Start_UTC':ht.isoformat(),'Home':home,'Away':away,
+            'Game_Start_UTC':ht.isoformat(),'Home':home,'Away':away,'Week':h.get('Week'),
             'Home_Team':home,'Away_Team':away,
             'Matchup':away+' @ '+home,
             'Selected_Team':None,
@@ -2323,7 +2765,7 @@ def read_current_cfbd_fixture_slate(bq_client, *, now=None, horizon_days=14):
             'CORE_Provenance':'NOT_SCORED__RETIRED_WEEKLY_MODULE_REMOVED',
             'V55_Bet_Authority':0})
     frame=pd.DataFrame(fixtures,columns=['Game_ID','CFBD_Game_ID','Season','Game_Start_UTC',
-       'Home','Away','Home_Team','Away_Team','Matchup','Selected_Team',
+       'Home','Away','Home_Team','Away_Team','Matchup','Selected_Team','Week',
        'CORE_Projected_Home_Margin','CORE_Residual_SD','CORE_Provenance','V55_Bet_Authority'])
     if frame['Game_ID'].duplicated().any():raise RuntimeError('DUPLICATE_CANONICAL_CFBD_SLATE_GAME')
     audit={'status':'PASS_CFBD_UPCOMING_FIXTURES' if len(frame) else 'HOLD_NO_CFBD_UPCOMING_FIXTURES',
@@ -2385,8 +2827,12 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     source_hold=None
     seven_brain_input_audit={'status':'NOT_CONFIGURED','accepted_events':0}
     try:
+        if not (sources_manifest or signals_uri or signals_table):
+            default_blob=gcs.bucket(bucket).blob(V55_DEFAULT_LIVE_MANIFEST_KEY)
+            if default_blob.exists():
+                sources_manifest='gs://'+bucket+'/'+V55_DEFAULT_LIVE_MANIFEST_KEY
         if sources_manifest:
-            signals,seven_brain_input_audit=read_seven_brain_signal_sources(sources_manifest,bq)
+            signals,seven_brain_input_audit=read_seven_brain_signal_sources(sources_manifest,bq,storage_client=gcs)
             if seven_brain_input_audit['status']!='PASS':
                 source_hold='LIVE_SEVEN_BRAIN_SOURCE_VALIDATION_HOLD'
         elif signals_uri:
@@ -2579,6 +3025,37 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
             # quote_normal dates are objects; score_snapshot receives text.
             qrows=[{**q,'kickoff_utc':q['kickoff'].isoformat(),
                      'quote_observed_at_utc':q['quote'].isoformat()} for q in valid_quotes]
+            try:
+                new_library,library_audit=produce_v55_library_signals(
+                    board,ml_feature_rows,qrows,storage_client=gcs,bucket=bucket,
+                    bq_client=bq,horizon_days=14,now=shadow_quote_clock)
+                saved_library,_=read_recent_v55_prospective_captures(
+                    gcs,bucket,include_reference_quotes=True)
+                refs={s(e.get('signal_capture_ref')) for e in new_library}
+                signals=signals+new_library+[e for e in saved_library
+                    if e.get('producer')==V55_LIBRARY_MINER_PRODUCER
+                    and s(e.get('signal_capture_ref')) not in refs]
+            except Exception as exc:
+                library_audit={'status':'HOLD_PUBLISHED_MINER_LIBRARY',
+                               'error':type(exc).__name__+':'+str(exc)[:240]}
+            audit['published_miner_library']=library_audit
+            log('[NCAAF-V55-PUBLISHED-MINER-LIBRARY] '+json.dumps(library_audit,sort_keys=True))
+            try:
+                verified_pairs,_=v55_validate_shadow_quote_pairs(qrows)
+                history=grade_v55_live_picks_from_history(gcs,bucket,signals,verified_pairs,bq_client=bq)
+                history_by_game=defaultdict(list)
+                for grade in history.get('picks',[])+history.get('exact_combinations',[]):
+                    history_by_game[grade['game_id']].append(grade)
+                for row in output:
+                    row['V55_Current_Pick_Historical_Grades_JSON']=json.dumps(
+                        history_by_game.get(s(row.get('Game_ID') or row.get('game_id')),[]),allow_nan=False)
+                audit['current_pick_historical_grades']={k:v for k,v in history.items()
+                                                        if k not in ('picks','exact_combinations')}
+            except Exception as exc:
+                audit['current_pick_historical_grades']={
+                    'status':'HOLD_HISTORICAL_GRADE_SOURCE','error':type(exc).__name__+':'+str(exc)[:200]}
+            log('[NCAAF-V55-CURRENT-PICK-HISTORICAL-GRADES] '+json.dumps(
+                audit['current_pick_historical_grades'],sort_keys=True))
             shadow=score_snapshot(specs,md,ml_feature_rows,qrows,signals)
             # Store a compact per-game audit without modifying ROI authority.
             per_game=defaultdict(list)
@@ -2857,12 +3334,14 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     # Exact accepted event kickoff by game. Do not attribute stale, fabricated
     # or postgame expert evidence to the live prospective shadow.
     kickoffs={str(q['game_id']):clock(q.get('kickoff_utc')) for q in quotes}
-    spread_prices={(s(q.get('game_id')),s(q.get('side')).upper(),s(q.get('book')).lower(),
+    market_prices={(s(q.get('game_id')),market(q.get('market')),s(q.get('side')).upper(),s(q.get('book')).lower(),
                     num(q.get('line')),num(q.get('odds')),clock(q.get('quote_observed_at_utc')))
-                   for q in quotes if q.get('market')=='spreads'}
+                   for q in quotes}
     signal_holds=Counter()
     for ev in signals:
         if not isinstance(ev,dict):continue
+        if ev.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
+            continue
         key=str(ev.get('game_id') or ev.get('Game_ID') or '')
         fam=family(ev.get('source_family') or ev.get('Source_Family'))
         signal_time=clock(ev.get('signal_observed_at_utc') or ev.get('Signal_Observed_At_UTC'))
@@ -2876,12 +3355,12 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
         # 'signal_capture_ref'. A bare direction_verified flag is insufficient.
         if not (s(ev.get('signal_capture_ref')) or s(ev.get('source_capture_ref'))):
             signal_holds['EXPERT_ORIGINAL_CAPTURE_PROVENANCE_MISSING']+=1;continue
-        if ev.get('producer')==V55_RECOVERED_MARKET_PRODUCER:
+        if ev.get('producer')==V55_LIBRARY_MINER_PRODUCER:
             quoted=clock(ev.get('quote_observed_at_utc'))
-            price=(key,s(ev.get('side')).upper(),s(ev.get('book')).lower(),
+            price=(key,market(ev.get('market')),s(ev.get('side')).upper(),s(ev.get('book')).lower(),
                    num(ev.get('line')),num(ev.get('odds')),quoted)
             if not (quoted and quoted<=signal_time and
-                    clock(ev.get('kickoff_utc'))==kickoff and price in spread_prices):
+                    clock(ev.get('kickoff_utc'))==kickoff and price in market_prices):
                 signal_holds['RECOVERED_SIGNAL_QUOTE_NO_LONGER_CURRENT']+=1;continue
         if fam in ('CORE','STAT','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH'):
             signal_counts[key].add(fam)
