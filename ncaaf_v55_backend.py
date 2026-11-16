@@ -1460,6 +1460,10 @@ def produce_v55_full_history_miner(board, feature_rows, qualified_registry, *,
         'evaluated_side_features':0,'fired':0,'holds':{},'legacy_v2_used':False,
         'bet_authority':0}
     if not rules:return [],audit
+    if (qualified_registry or {}).get('historical_screen_only'):
+        return produce_v55_recovered_market_shadow(
+            board,qualified_registry,storage_client=storage_client,
+            bucket=bucket,now=at)
     if hasattr(board,'to_dict'):board=board.to_dict('records')
     byid={s(r.get('Game_ID') or r.get('game_id')):r for r in board}
     oriented=[]
@@ -1537,6 +1541,235 @@ def produce_v55_full_history_miner(board, feature_rows, qualified_registry, *,
         audit.update(status='HOLD_MINER_CAPTURE_WRITE_FAILED',error=type(exc).__name__+':'+str(exc)[:160])
         return [],audit
 
+# ---------------------------------------------------------------------------
+# V5.5 IN-MODULE HISTORICAL-SYSTEM CONNECTOR (NO NEW REPO MODULE/REGISTRY).
+# This adapter reconstructs only executable RESEARCH-SHADOW rules from the
+# existing full-history issuer and its SHA-pinned frozen V5 rule definitions.
+# It does not manufacture approvals, point-in-time historical capture or ROI
+# certificates. An actually approved executable registry always takes priority.
+# ---------------------------------------------------------------------------
+def connect_v55_existing_historical_rules(storage_client, bucket, *, now=None):
+    """Join historical screen passes to exact frozen rules; never promote them.
+
+    Reads existing GCS objects directly; nothing is published or re-tested.
+    Only an explicitly implemented original predicate may become a forward
+    prospective research firing. Unsupported atoms remain visible holds.
+    """
+    import re
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    audit={'status':'HOLD_HISTORICAL_RULE_CONNECTOR','historical_screen_passes':0,'raw_historical_screen_passes':0,
+           'frozen_systems_matched':0,'executable_shadow_rules':0,
+           'approved_executable_rules':0,'bet_authority':0,
+           'repeat_validation_performed':False,'recovery_mode_used':False,
+           'systems_held':{},'by_family':{},'source_sha256_verified':False,
+           'historical_original_capture_certified':False}
+    try:
+        registry_key='research/ncaaf/v55/qualified_independent_brains_v55_current.json'
+        raw=storage_client.bucket(bucket).blob(registry_key).download_as_bytes()
+        doc=json.loads(raw)
+        if (not isinstance(doc,dict) or doc.get('schema')!=V55_QUALIFICATION_SCHEMA
+            or doc.get('policy')!=V55_QUALIFICATION_POLICY
+            or doc.get('uses_2026_outcomes') is not False):
+            audit['status']='HOLD_HISTORICAL_ISSUER_SCHEMA_OR_LEAKAGE'
+            return None,audit
+        records=doc.get('candidate_diagnostics')
+        if not isinstance(records,list):
+            audit['status']='HOLD_NO_HISTORICAL_CANDIDATES'
+            return None,audit
+        receipts=((doc.get('source_audit') or {}).get('source_receipts') or {})
+        frozen=receipts.get('FROZEN_MINER') or {}
+        uri=s(frozen.get('uri'))
+        match=re.fullmatch(r'gs://([^/]+)/(.+\.csv)',uri)
+        digest=s(frozen.get('sha256')).lower()
+        if not match or match.group(1)!=bucket or not re.fullmatch(r'[0-9a-f]{64}',digest):
+            audit['status']='HOLD_NO_PINNED_FROZEN_RULE_SOURCE'
+            return None,audit
+        frozen_raw=storage_client.bucket(bucket).blob(match.group(2)).download_as_bytes()
+        if hashlib.sha256(frozen_raw).hexdigest()!=digest:
+            audit['status']='HOLD_FROZEN_RULE_SHA256_MISMATCH'
+            return None,audit
+        audit['source_sha256_verified']=True
+        frozen_rows=list(csv.DictReader(io.StringIO(frozen_raw.decode('utf-8-sig'))))
+        by_rule=defaultdict(list)
+        for item in frozen_rows:
+            by_rule[s(item.get('rule_id'))].append(item)
+        ready={};holds=Counter();passes=Counter();seen_systems=set();seen_record_fingerprints=set()
+        # Closed original-atom recipe list: only where the original source
+        # semantics are directly observable on a *current, paired* quote.
+        # No arbitrary unknown atom is assumed to be a BigQuery field.
+        market_atoms={
+          'DOG_3_7':[{'field':'CURRENT_SPREAD','op':'>=','value':3.0},
+                     {'field':'CURRENT_SPREAD','op':'<=','value':7.0}],
+        }
+        for candidate in records:
+            if not isinstance(candidate,dict):continue
+            fam=family(candidate.get('family'));sid=s(candidate.get('system_id'))
+            key=(fam,sid)
+            if not sid or fam not in BRAINS or key in seen_systems:
+                holds['DUPLICATE_OR_INVALID_CANDIDATE_ID']+=1;continue
+            seen_systems.add(key)
+            recorded=candidate.get('full_history_statistical_screen') or {}
+            screen=v55_full_history_statistical_screen(candidate.get('by_season') or {})
+            if not (screen.get('pass') is True and recorded.get('pass') is True
+                and recorded.get('policy')==V55_HISTORY_SCREEN_POLICY
+                and screen.get('posterior_prob')==recorded.get('posterior_prob')
+                and screen.get('decisive_n')==recorded.get('decisive_n')):
+                holds['HISTORICAL_80PCT_SCREEN_NOT_VERIFIED']+=1;continue
+            audit['raw_historical_screen_passes']+=1
+            # Independently published aliases carrying the same historical
+            # wins/losses are ONE evidence population, not separate support.
+            evidence=(fam,tuple((str(y),int(v.get('wins',0)),int(v.get('losses',0)),
+                     int(v.get('pushes',0))) for y,v in sorted((candidate.get('by_season') or {}).items())))
+            if evidence in seen_record_fingerprints:
+                holds['IDENTICAL_HISTORICAL_EVIDENCE_DUPLICATE']+=1;continue
+            seen_record_fingerprints.add(evidence)
+            audit['historical_screen_passes']+=1;passes[fam]+=1
+            if fam!='SYSTEM_MINER':
+                holds['EXPERT_NEEDS_EXACT_NAMED_LIVE_RULE_RECIPE']+=1;continue
+            rows=by_rule.get(sid,[])
+            if not rows:
+                holds['NO_MATCHING_FROZEN_MINER_DEFINITION']+=1;continue
+            audit['frozen_systems_matched']+=1
+            definitions={(s(row.get('market')).lower(),s(row.get('direction')).upper(),
+                          s(row.get('condition_atoms')),s(row.get('underlying_sources')))
+                          for row in rows}
+            if (len(definitions)!=1 or any(s(row.get('catalog_exact_duplicate_id')) for row in rows)):
+                holds['CONFLICTING_OR_DUPLICATE_FROZEN_RULE_RECIPE']+=1;continue
+            m,d,atoms,sources=next(iter(definitions))
+            if m!='spreads' or d not in ('PLAY_ON','FADE'):
+                holds['FROZEN_MARKET_OR_DIRECTION_UNSUPPORTED']+=1;continue
+            if atoms not in market_atoms:
+                holds['FROZEN_ATOM_NEEDS_VERIFIED_LIVE_SOURCE']+=1;continue
+            # These conditions execute only on actual paired sportsbook lines.
+            # This is a current prospective signal, NOT historical validation.
+            conditions=market_atoms[atoms]
+            definition_sha=sha({'frozen_csv_sha256':digest,'system_id':sid,
+                 'market':m,'direction':d,'atoms':atoms,'sources':sources,
+                 'conditions':conditions})
+            ready[key]={'family':fam,'id':sid,'direction':d,
+               'market':m,'conditions':conditions,'source_atom':atoms,
+               'key':'SYSTEM_MINER|FROZEN_V5_SHARED_DISCOVERY',
+               'independence_group':'SYSTEM_MINER|FROZEN_V5_SHARED_DISCOVERY',
+               'frozen_hash':definition_sha,'source_pinned_sha256':digest,
+               'historical_posterior_prob':screen['posterior_prob'],
+               'historical_decisive_n':screen['decisive_n'],
+               'qualification_level':'HISTORICAL_SCREEN_ONLY',
+               'historical_roi_certified':False}
+        audit['by_family']=dict(passes)
+        audit['systems_held']=dict(holds)
+        audit['executable_shadow_rules']=len(ready)
+        audit['source_uri']=uri
+        audit['historical_registry_uri']='gs://'+bucket+'/'+registry_key
+        audit['historical_registry_sha256']=hashlib.sha256(raw).hexdigest()
+        audit['current_live_recipe_coverage']='SUPPORTED_ATOMS_ONLY'
+        if not ready:
+            audit['status']='HOLD_NO_DIRECTLY_EXECUTABLE_RECOVERED_RULES'
+            return None,audit
+        audit['status']='PASS_RECOVERED_SHADOW_RECIPES_NO_AUTHORITY'
+        return {'rules':ready,'report_sha256':hashlib.sha256(raw).hexdigest(),
+                'miner_rules':len(ready),'historical_screen_only':True,
+                'qualification_status':'HISTORICAL_SCREEN_ONLY',
+                'research_only':True,'bet_authority':0,
+                'source_seasons':'2013-2025'},audit
+    except Exception as exc:
+        audit.update(status='HOLD_HISTORICAL_SOURCE_FETCH_OR_PARSE',
+                     error=type(exc).__name__+':'+str(exc)[:200])
+        return None,audit
+
+
+def produce_v55_recovered_market_shadow(board, historical_registry, *,
+                                         storage_client, bucket, now=None):
+    """Execute recovered *market-only* recipes on genuine current quotes.
+
+    Does not infer non-market pregame features, grant historical OOS approval,
+    or create ROI certificates. Writes first-seen prospective events only.
+    """
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    rules={k:r for k,r in (historical_registry.get('rules') or {}).items()
+           if k[0]=='SYSTEM_MINER' and r.get('qualification_level')=='HISTORICAL_SCREEN_ONLY'}
+    holds=Counter();prepared=[]
+    if hasattr(board,'to_dict'):board=board.to_dict('records')
+    if not rules:
+        return [],{'status':'NO_RECOVERED_MARKET_SHADOW_RULES','fired':0,'holds':{},'bet_authority':0}
+    # Exclude repeat firings for identical quote+rule+side between audit cycles.
+    prior_ids=set()
+    try:
+        prior,_=read_recent_v55_prospective_captures(storage_client,bucket,now=at)
+        prior_ids={s(x.get('capture_id')) for x in prior}
+    except Exception:
+        # If prior-capture inspection fails, fail closed rather than emitting
+        # duplicate prospective signals.
+        return [],{'status':'HOLD_CANNOT_RECONCILE_PREVIOUS_CAPTURES',
+                    'fired':0,'bet_authority':0}
+    for row in board:
+        gid=s(row.get('Game_ID') or row.get('game_id'))
+        kick=clock(row.get('Game_Start_UTC'))
+        quoted=clock(row.get('Backend_Quote_Timestamp'))
+        book=s(row.get('Backend_Quote_Book')).lower()
+        state=s(row.get('Quote_State'))
+        if not (gid and kick and quoted and quoted<=at<kick and book and
+                (at-quoted).total_seconds()<=900 and state.startswith('FRESH_')):
+            holds['MISSING_FRESH_PAIRED_PREGAME_QUOTE']+=1;continue
+        prices={side:(num(row.get('Backend_'+prefix+'_Spread')),
+                      num(row.get('Backend_'+prefix+'_Odds_American')))
+                for side,prefix in (('HOME','Home'),('AWAY','Away'))}
+        if (any(ln is None or profit(odds) is None for ln,odds in prices.values())
+            or abs(prices['HOME'][0]+prices['AWAY'][0])>0.01):
+            holds['SPREAD_SIDE_PAIR_INVALID']+=1;continue
+        for side,(line,odds) in prices.items():
+            observed={'CURRENT_SPREAD':line}
+            for (fam,sid),rule in rules.items():
+                cond=rule.get('conditions') or []
+                if (not cond or any(c.get('field') not in observed for c in cond)
+                    or not all(_v55_exact_condition(observed,c) for c in cond)):
+                    continue
+                selected_side=side if rule['direction']=='PLAY_ON' else (
+                    'HOME' if side=='AWAY' else 'AWAY')
+                sel_line,sel_odds=prices[selected_side]
+                identity=(gid,'spreads',selected_side,book,sel_line,
+                          fam,sid,quoted.isoformat())
+                capture_id=sha(('V55_FROZEN_HISTORICAL_SHADOW',identity))
+                if capture_id in prior_ids:
+                    holds['ALREADY_CAPTURED_THIS_EXACT_QUOTE']+=1;continue
+                prior_ids.add(capture_id)
+                prepared.append({'game_id':gid,'market':'spreads',
+                    'side':selected_side,'source_family':fam,'system_id':sid,
+                    'evidence_family_key':rule['key'],
+                    'frozen_definition_sha256':rule['frozen_hash'],
+                    'book':book,'line':sel_line,'odds':sel_odds,
+                    'kickoff_utc':kick.isoformat(),
+                    'signal_observed_at_utc':at.isoformat(),
+                    'quote_observed_at_utc':quoted.isoformat(),
+                    'quote_capture_ref':'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(
+                        ('OBSERVED_QUOTE',gid,book,quoted.isoformat(),
+                         prices['HOME'],prices['AWAY'])),
+                    'direction_verified':True,
+                    'prospective_evaluation_after_quote':True,
+                    'original_event_created_prospectively':True,
+                    'capture_id':capture_id,'signal_capture_ref':None,
+                    'producer':'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW',
+                    'rule_registry_sha256':historical_registry['report_sha256'],
+                    'historical_posterior_prob':rule['historical_posterior_prob'],
+                    'qualification_level':'HISTORICAL_SCREEN_ONLY',
+                    'independence_group':rule['independence_group'],
+                    'historical_betting_roi_certified':False,
+                    'bet_authority':0})
+    if not prepared:
+        return [],{'status':'NO_NEW_RECOVERED_MARKET_FIRINGS','fired':0,
+                   'frozen_rules':len(rules),'holds':dict(holds),'bet_authority':0}
+    try:
+        captured,cap=persist_v55_prospective_events(prepared,storage_client,bucket,now=at)
+    except Exception as exc:
+        return [],{'status':'HOLD_RECOVERED_CAPTURE_WRITE_FAILED','fired':0,
+                   'error':type(exc).__name__+':'+str(exc)[:200],
+                   'holds':dict(holds),'bet_authority':0}
+    return captured,{'status':'PASS_RECOVERED_SHADOW_CAPTURES','fired':len(captured),
+                     'frozen_rules':len(rules),'holds':dict(holds),
+                     'capture':cap,'bet_authority':0,
+                     'independent_of_core':True,
+                     'historical_authority_claimed':False}
+
+
 # Read existing qualification publications, including versioned archived registries.
 # Discovery is not qualification: only records accepted by the unchanged strict
 # validate_v55_current_qualification() contract can execute prospective rules.
@@ -1608,7 +1841,20 @@ def discover_v55_qualified_registry(storage_client, bucket, *, now=None):
            'listing_issues':listing_issues,
            'historical_candidates_not_promoted':True}
     if not eligible:
-        audit['reason']='Existing publications contain no approved executable rules satisfying the live contract'
+        # Existing validated *historical* systems can be adapted prospectively
+        # without publishing a false approved registry. These firings remain
+        # research-only until separate genuine ROI/authority certification.
+        historical,trace=connect_v55_existing_historical_rules(
+            storage_client,bucket,now=at)
+        audit['historical_rule_connector']=trace
+        audit['approved_executable_rule_count']=0
+        if historical and historical.get('rules'):
+            audit.update(status='PASS_HISTORICAL_MARKET_SHADOW_CONNECTOR',
+                qualified_rule_count=0,
+                executable_shadow_rule_count=len(historical['rules']),
+                reason='Historical screened frozen rules may produce only captured research-shadow signals; no live authority granted')
+            return historical,audit
+        audit['reason']='No approved executable registry; recovered historical connector also held'
         return None,audit
     eligible.sort(key=lambda item:(item[0],item[1],item[2]),reverse=True)
     _,_,key,verified,item=eligible[0]
@@ -1640,7 +1886,9 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
     problem=None if frozen else lookup_audit.get('status')
     audit['qualification_registry_uri']=lookup_audit.get('selected_uri') or lookup_audit.get('configured_uri')
     audit['qualification_systems']=lookup_audit.get('qualified_rule_count',0)
-    audit['historical_research_not_live_approved']=not bool(frozen)
+    audit['historical_shadow_executable_rules']=lookup_audit.get('executable_shadow_rule_count',0)
+    audit['historical_research_not_live_approved']=bool(
+        (frozen or {}).get('historical_screen_only') or not frozen)
 
     if problem or not frozen or not frozen.get('rules'):
         audit.update(status='HOLD_NO_FROZEN_EXPERT_LIVE_RULE_REGISTRY',reason=str(problem or 'NO_FROZEN_RULES'))
@@ -1738,8 +1986,10 @@ def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
     audit['rule_registry']={'status':lookup_audit.get('status'),
         'selected_uri':lookup_audit.get('selected_uri'),
         'configured_uri':lookup_audit.get('configured_uri'),
-        'qualified_rule_count':len((qualified or {}).get('rules') or {}),
-        'validation_hold':None if qualified else lookup_audit.get('reason') or lookup_audit.get('status'),
+        'qualified_rule_count':0 if (qualified or {}).get('historical_screen_only') else len((qualified or {}).get('rules') or {}),
+        'executable_shadow_rule_count':len((qualified or {}).get('rules') or {}) if (qualified or {}).get('historical_screen_only') else 0,
+        'historical_screen_only':bool((qualified or {}).get('historical_screen_only')),
+        'validation_hold':lookup_audit.get('reason') if (qualified or {}).get('historical_screen_only') else (None if qualified else lookup_audit.get('reason') or lookup_audit.get('status')),
         'lookup':lookup_audit}
     if qualified is not None:
         try:
