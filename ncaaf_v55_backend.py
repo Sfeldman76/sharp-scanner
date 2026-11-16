@@ -755,13 +755,16 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         # Preserve its ORIGINAL timestamp solely to link the same CFBD
         # game-side prior-feature rows; NEVER use the placeholder as kickoff.
         original=clock(r.get('V55_Original_CFBD_Kickoff_UTC'))
-        market_verified=(s(r.get('V55_Kickoff_Verification')) ==
-            'VERIFIED_TWO_SIDED_SPORTSBOOK_REPLACED_CFBD_MIDNIGHT_PLACEHOLDER')
-        if (market_verified and original and original!=kick
-                and abs((original-kick).total_seconds())<=26*3600
-                and original.astimezone(ZoneInfo('America/New_York')).hour==0
-                and original.astimezone(ZoneInfo('America/New_York')).minute==0):
-            verified_placeholder_hints[board_id]=original
+        market_verification=s(r.get('V55_Kickoff_Verification'))
+        if original and original!=kick:
+            eastern=ZoneInfo('America/New_York')
+            original_local=original.astimezone(eastern)
+            if ((market_verification=='VERIFIED_TWO_SIDED_SPORTSBOOK_SAME_GAME_DATE'
+                    and original_local.date()==kick.astimezone(eastern).date())
+                or (market_verification=='VERIFIED_TWO_SIDED_SPORTSBOOK_REPLACED_CFBD_MIDNIGHT_PLACEHOLDER'
+                    and abs((original-kick).total_seconds())<=26*3600
+                    and original_local.hour==0 and original_local.minute==0)):
+                verified_placeholder_hints[board_id]=original
         identity=(home,away,kick,cfbd_id)
         if board_id in seen_board and seen_board[board_id]!=identity:
             holds['CONFLICTING_BOARD_GAME_ID']+=1;seen_board[board_id]=None

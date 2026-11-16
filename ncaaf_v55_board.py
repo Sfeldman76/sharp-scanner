@@ -613,11 +613,17 @@ def _paired_spread(book_quotes, home, away):
             break
     if not choices:
         return None
+    if book_quotes["_kick"].nunique()>1:
+        best=max(p[0] for p in choices)
+        if len({p[2]["_kick"] for p in choices if p[0]==best})>1:
+            return None
     choices.sort(key=lambda p:(p[0],p[1]),reverse=True)
     return choices[0][2], choices[0][3]
 
 
-def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minutes=QUOTE_MAX_AGE_MINUTES):
+def attach_verified_backend_quotes(forecasts, quotes, *, now=None,
+                                   max_age_minutes=QUOTE_MAX_AGE_MINUTES,
+                                   match_game_date=False):
     """Attach backend market evidence without inventing a V5.5 betting pick.
 
     Missing Selected_Team is normal for the independent CORE-only forecast. A
@@ -678,6 +684,9 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
                &kickoff.le(now+pd.Timedelta(days=14))))
     report['cfbd_midnight_placeholder_games']=int((upcoming & placeholders).sum())
     report['verified_market_kickoff_repairs']=0
+    if match_game_date:
+        report['fixture_match_policy']='EXACT_HOME_AWAY_AND_EASTERN_GAME_DATE'
+        report['same_date_kickoff_versions_resolved']=0
     report['alias_normalization_version']='V55_EXPLICIT_SCHOOL_MASCOT_20261022'
     report["upcoming_forecast_rows"]=int(upcoming.sum())
     if not upcoming.any():
@@ -752,7 +761,28 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
                 out.at[idx,'Quote_State']='NO_CURRENT_MARKET_FOR_THIS_TEAM_PAIR'
                 note(idx,'NO_MARKET_TEAM_PAIR_IN_CURRENT_SPORTSBOOK_FEED')
             continue
-        exact=cand.loc[(cand["_kick"]-kickoff.loc[idx]).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        if match_game_date:
+            game_date=kickoff.loc[idx].tz_convert('America/New_York').date()
+            same_date=cand.loc[cand['_kick'].dt.tz_convert('America/New_York').dt.date.eq(game_date)
+                               &cand['_home'].eq(home)&cand['_away'].eq(away)]
+            pair=_paired_spread(same_date,home,away) if oriented else None
+            if pair is None:
+                report['no_valid_kickoff_match']+=1
+                report['no_matching_game']+=1
+                out.at[idx,'Quote_State']='NO_VERIFIED_TWO_SIDED_SAME_DATE_SPREAD'
+                note(idx,'NO_VERIFIED_SAME_DATE_PAIRED_MARKET')
+                continue
+            chosen_kick=pair[0]['_kick']
+            cand=same_date.loc[same_date['_kick'].eq(chosen_kick)]
+            if same_date['_kick'].nunique()>1:
+                report['same_date_kickoff_versions_resolved']+=1
+            if kickoff.loc[idx]!=chosen_kick:
+                out.at[idx,'V55_Original_CFBD_Kickoff_UTC']=kickoff.loc[idx].isoformat()
+                out.at[idx,'Game_Start_UTC']=chosen_kick.isoformat()
+                out.at[idx,'V55_Kickoff_Verification']='VERIFIED_TWO_SIDED_SPORTSBOOK_SAME_GAME_DATE'
+                report['verified_market_kickoff_repairs']+=1
+        exact=cand if match_game_date else cand.loc[
+            (cand["_kick"]-kickoff.loc[idx]).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
         kickoff_repaired=False
         if exact.empty and oriented:
             repaired=_verified_market_placeholder_repair(cand,kickoff.loc[idx],home,away)

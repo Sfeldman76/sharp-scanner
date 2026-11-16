@@ -433,7 +433,8 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket, horizon_days=14, max_games
             max_age_minutes=(int((now-oldest_quote).total_seconds()//60)+1
                              if pd.notna(oldest_quote) else 1)
             joined=stage('paired_quote_to_fixture_join', lambda:board_mod.attach_verified_backend_quotes(
-                fixture_frame,quote_frame,now=now,max_age_minutes=max_age_minutes))
+                fixture_frame,quote_frame,now=now,max_age_minutes=max_age_minutes,
+                match_game_date=True))
             if joined is not None:
                 board,quote_audit=joined
                 result['stages']['paired_quote_to_fixture_join'].update(quote_audit)
