@@ -952,7 +952,28 @@ def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=No
     config=bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter('season','INT64',now.year),
         bigquery.ScalarQueryParameter('now','TIMESTAMP',now)])
-    return [dict(row.items()) for row in bq_client.query(sql,job_config=config).result()]
+    rows=[dict(row.items()) for row in bq_client.query(sql,job_config=config).result()]
+    # Wyoming Athletics moved this game to Friday, November 20 at 7 p.m. MST.
+    # Match the exact stale CFBD fixture on both sides and preserve its ID.
+    if now.year==2026:
+        stale_kickoff=datetime(2026,11,22,2,tzinfo=timezone.utc)
+        official_kickoff=datetime(2026,11,21,2,tzinfo=timezone.utc)
+        candidates=defaultdict(list)
+        for row in rows:
+            gid=_v55_live_id(row.get('Game_ID'))
+            if gid and clock(row.get('Game_Date'))==stale_kickoff:
+                candidates[gid].append(row)
+        matches=[pair for pair in candidates.values() if len(pair)==2 and
+            {(_v55_cfbd_school_key(r.get('Team_Key')),num(r.get('Is_Home')))
+             for r in pair}=={('wyoming',1.0),('newmexico',0.0)}]
+        if len(matches)==1:
+            pair=matches[0]
+            gid=_v55_live_id(pair[0].get('Game_ID'))
+            if sum(_v55_live_id(row.get('Game_ID'))==gid for row in rows)==2:
+                for row in pair:
+                    row['Original_Game_Date']=row['Game_Date']
+                    row['Game_Date']=official_kickoff
+    return rows
 
 
 def read_original_live_signals_from_bq(bq_client,table_id,*,now=None):
@@ -2266,7 +2287,7 @@ def read_current_cfbd_fixture_slate(bq_client, *, now=None, horizon_days=14):
     for item in source:
         gid=_v55_live_id(item.get('Game_ID'))
         if gid:groups[gid].append(item)
-    fixtures=[];holds=Counter()
+    fixtures=[];holds=Counter();corrections=[]
     for gid,records in sorted(groups.items()):
         if len(records)!=2:
             holds['NOT_EXACTLY_TWO_SIDES']+=1;continue
@@ -2287,6 +2308,11 @@ def read_current_cfbd_fixture_slate(bq_client, *, now=None, horizon_days=14):
         if ht>at+timedelta(days=horizon_days) or (ht<=at and not
                 (is_placeholder and ht>=at-timedelta(hours=26))):
             holds['OUTSIDE_UPCOMING_WINDOW']+=1;continue
+        original_kickoff=clock(h.get('Original_Game_Date'))
+        if original_kickoff:
+            corrections.append({'game_id':gid,'matchup':away+' @ '+home,
+                'original_kickoff_utc':original_kickoff.isoformat(),
+                'corrected_kickoff_utc':ht.isoformat(),'source':'WYOMING_ATHLETICS'})
         fixtures.append({'Game_ID':gid,'CFBD_Game_ID':gid,'Season':int(num(h.get('Season'))),
             'Game_Start_UTC':ht.isoformat(),'Home':home,'Away':away,
             'Home_Team':home,'Away_Team':away,
@@ -2302,7 +2328,8 @@ def read_current_cfbd_fixture_slate(bq_client, *, now=None, horizon_days=14):
     if frame['Game_ID'].duplicated().any():raise RuntimeError('DUPLICATE_CANONICAL_CFBD_SLATE_GAME')
     audit={'status':'PASS_CFBD_UPCOMING_FIXTURES' if len(frame) else 'HOLD_NO_CFBD_UPCOMING_FIXTURES',
         'source_table':table,'source_rows':len(source),'games':len(frame),
-        'invalid_or_excluded':dict(holds),'retired_weekly_module_used':False,
+        'invalid_or_excluded':dict(holds),'kickoff_corrections':corrections,
+        'retired_weekly_module_used':False,
         'core_forecasts_synthesized':False,'bet_authority':0}
     if frame.empty:raise RuntimeError('NO_CURRENT_CANONICAL_CFBD_FIXTURES:'+json.dumps(audit,sort_keys=True))
     return frame,audit
