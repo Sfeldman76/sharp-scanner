@@ -2098,9 +2098,64 @@ def _v55_miner_score_fields(fixture, game_id, teams, held_teams, at):
     return fields
 
 
+def _v55_capture_miner_box_scores(bq_client, seasons):
+    """Retain box-score versions first observed by this backend run."""
+    from google.cloud import bigquery
+
+    bq_client.query("""
+        CREATE TABLE IF NOT EXISTS
+          `sharplogger.sharp_data.ncaaf_cfbd_postgame_feed_versions_v1`
+        (season INT64, game_id INT64, feed STRING, status STRING,
+         record_count INT64, payload_json STRING, ingested_at TIMESTAMP, payload_sha256 STRING)
+        PARTITION BY DATE(ingested_at)
+        CLUSTER BY season, feed, game_id
+    """).result()
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+    ])
+    job=bq_client.query("""
+        INSERT INTO `sharplogger.sharp_data.ncaaf_cfbd_postgame_feed_versions_v1`
+          (season, game_id, feed, status, record_count, payload_json, ingested_at, payload_sha256)
+        WITH live AS (
+          SELECT DISTINCT season, game_id, feed, status, record_count, payload_json
+          FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_feeds_v1`
+          WHERE season IN UNNEST(@seasons) AND status = 'PRESENT'
+            AND feed IN ('team_game','player_game','advanced_game')
+            AND game_id IS NOT NULL AND ingested_at <= CURRENT_TIMESTAMP()
+            AND payload_json IS NOT NULL AND record_count > 0
+        ), unambiguous AS (
+          SELECT *, LOWER(TO_HEX(SHA256(payload_json))) AS payload_sha256
+          FROM live
+          QUALIFY COUNT(*) OVER (PARTITION BY season,game_id,feed) = 1
+        ), latest_archived AS (
+          SELECT season, game_id, feed, payload_json
+          FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_feed_versions_v1`
+          WHERE season IN UNNEST(@seasons) AND ingested_at <= CURRENT_TIMESTAMP()
+          QUALIFY DENSE_RANK() OVER (
+            PARTITION BY season,game_id,feed ORDER BY ingested_at DESC
+          ) = 1
+        ), previous AS (
+          SELECT season, game_id, feed, ANY_VALUE(payload_json) AS payload_json,
+                 COUNT(DISTINCT payload_json) AS version_count
+          FROM latest_archived
+          GROUP BY season,game_id,feed
+        )
+        SELECT v.season, v.game_id, v.feed, v.status, v.record_count, v.payload_json,
+               CURRENT_TIMESTAMP(), v.payload_sha256
+        FROM unambiguous v LEFT JOIN previous p USING (season,game_id,feed)
+        WHERE p.version_count IS DISTINCT FROM 1
+           OR p.payload_json IS DISTINCT FROM v.payload_json
+    """,job_config=config)
+    job.result()
+    return {'status':'PASS','versions_inserted':job.num_dml_affected_rows,
+            'availability_basis':'BACKEND_WAREHOUSE_OBSERVATION_TIME'}
+
+
 def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
     """Build the frozen deep-context YPP fields from observed CFBD box scores."""
+    from google.api_core.exceptions import GoogleAPICallError, NotFound
     from google.cloud import bigquery
+    from itertools import chain
     from statistics import mean
     import re
 
@@ -2113,15 +2168,28 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
         bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
         bigquery.ScalarQueryParameter('as_of','TIMESTAMP',at),
     ])
-    rows=bq_client.query("""
+    def read_feeds(table):
+        return bq_client.query(f"""
         SELECT season, game_id, feed, payload_json, ingested_at
-        FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_feeds_v1`
+        FROM `sharplogger.sharp_data.{table}`
         WHERE season IN UNNEST(@seasons) AND ingested_at <= @as_of
           AND status = 'PRESENT' AND payload_json IS NOT NULL
           AND feed IN ('team_game','player_game','advanced_game')
-    """,job_config=cfg).result()
+        """,job_config=cfg).result()
+
+    latest_rows=read_feeds('ncaaf_cfbd_postgame_feeds_v1')
+    version_status='READ'
+    try:
+        version_rows=read_feeds('ncaaf_cfbd_postgame_feed_versions_v1')
+    except NotFound:
+        version_rows=()
+        version_status='TABLE_NOT_CREATED'
+    except GoogleAPICallError as exc:
+        version_rows=()
+        version_status=f'READ_FAILED_{type(exc).__name__}'
     feeds=defaultdict(lambda:defaultdict(dict))
-    for row in rows:
+    history_feeds=defaultdict(lambda:defaultdict(dict))
+    for row,archived in chain(((r,True) for r in version_rows),((r,False) for r in latest_rows)):
         key=(row['season'],_v55_live_id(row['game_id']))
         sides=participants.get(key,())
         observed=clock(row['ingested_at'])
@@ -2132,12 +2200,14 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
         except (TypeError,ValueError):
             continue
         if isinstance(payload,list):
-            versions=feeds[key][row['feed']]
             normalized=json.dumps(payload,sort_keys=True)
-            if observed not in versions:
-                versions[observed]=normalized
-            elif versions[observed]!=normalized:
-                versions[observed]=None
+            sources=(feeds,history_feeds) if archived else (feeds,)
+            for source in sources:
+                versions=source[key][row['feed']]
+                if observed not in versions:
+                    versions[observed]=normalized
+                elif versions[observed]!=normalized:
+                    versions[observed]=None
 
     def side_rows(payload, gid, flat=False):
         for item in payload:
@@ -2188,21 +2258,26 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
                 ypp[team]=yards/plays
         return ypp
 
-    timeline={}
-    for key,sources in feeds.items():
-        visible={}
-        updates=sorted((timestamp,feed,payload) for feed,versions in sources.items()
-                       for timestamp,payload in versions.items())
-        history=[]
-        for i,(timestamp,feed,payload) in enumerate(updates):
-            visible[feed]=json.loads(payload) if payload is not None else []
-            if i+1==len(updates) or timestamp!=updates[i+1][0]:
-                history.append((timestamp,pairs_for(key,visible)))
-        timeline[key]=history
+    def build_timeline(source):
+        timeline={}
+        for key,sources in source.items():
+            visible={}
+            updates=sorted((timestamp,feed,payload) for feed,versions in sources.items()
+                           for timestamp,payload in versions.items())
+            history=[]
+            for i,(timestamp,feed,payload) in enumerate(updates):
+                visible[feed]=json.loads(payload) if payload is not None else []
+                if i+1==len(updates) or timestamp!=updates[i+1][0]:
+                    history.append((timestamp,pairs_for(key,visible)))
+            timeline[key]=history
+        return timeline
 
-    def game_ypp(season,gid,team,cutoff):
+    current_timeline=build_timeline(feeds)
+    archived_timeline=build_timeline(history_feeds)
+
+    def game_ypp(timeline,season,gid,team,cutoff,*,before_kickoff=False):
         for stamp,values in reversed(timeline.get((season,gid),())):
-            if stamp<=cutoff:
+            if stamp<cutoff or (stamp==cutoff and not before_kickoff):
                 other=next((opp for opp,_ in participants[season,gid] if opp!=team),None)
                 offense,defense=values.get(team),values.get(other)
                 net=offense-defense if offense is not None and defense is not None else None
@@ -2211,7 +2286,7 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
 
     context={}
     for (season,team),games in schedules.items():
-        metrics=[game_ypp(season,gid,team,at) for _,gid,_,_ in games]
+        metrics=[game_ypp(current_timeline,season,gid,team,at) for _,gid,_,_ in games]
         fields={}
         for i,name in enumerate(('Off_YPP','Def_YPP_Allowed','Net_YPP')):
             for period,window in (('Season',metrics),('Recent3',metrics[-3:])):
@@ -2223,8 +2298,13 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
             if net is None:
                 continue
             opponent=next((opp for opp,_ in participants[season,gid] if opp!=team),None)
+            # The mutable table can contain older rows timestamped before the
+            # fetch began. Require an archived post-receipt version for the
+            # opponent's historical baseline.
             prior_net=[value for start,prior,_,_ in schedules.get((season,opponent),())
-                       if start<kick and (value:=game_ypp(season,prior,opponent,kick)[2]) is not None]
+                       if start<kick and
+                       (value:=game_ypp(archived_timeline,season,prior,opponent,kick,
+                                        before_kickoff=True)[2]) is not None]
             if prior_net:
                 adjusted.append(net+mean(prior_net))
         if adjusted:
@@ -2232,7 +2312,12 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
         if fields:
             fields['Deep_Game_Count_Prior']=len(games)
             context[season,team]=fields
-    return context,{'box_game_count':sum(len(h[-1][1])==2 for h in timeline.values()),
+    return context,{'box_game_count':sum(len(h[-1][1])==2 for h in current_timeline.values()),
+                    'box_version_history_status':version_status,
+                    'games_with_two_sided_archived_ypp':sum(
+                        any(len(values)==2 for _,values in h) for h in archived_timeline.values()),
+                    'team_seasons_with_opponent_adjustment':sum(
+                        'CTX_OppAdj_NetYPP' in values for values in context.values()),
                     'team_seasons_with_ypp':len(context)}
 
 
@@ -2275,11 +2360,17 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     ypp_fields={}
     audit['completed_game_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['ypp_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
+    audit['box_score_version_capture']={'status':'NOT_EVALUATED'}
     if bq_client is not None and pairs:
         relevant={gid:fixtures[gid] for gid,_ in pairs}
         seasons={int(season) for r in relevant.values() if (season:=num(r.get('Season'))) is not None
                  and season==int(season)}
         if seasons:
+            try:
+                audit['box_score_version_capture']=_v55_capture_miner_box_scores(bq_client,seasons)
+            except Exception as exc:
+                audit['box_score_version_capture']={'status':'HOLD_BOX_SCORE_VERSION_CAPTURE',
+                    'error':type(exc).__name__+':'+str(exc)[:240]}
             try:
                 score_rows=_v55_read_miner_score_history(bq_client,seasons,at)
                 teams,held_teams,score_counts=_v55_miner_score_history(score_rows,at)
@@ -2313,6 +2404,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     audit['ypp_inputs']={
                         'status':'PASS' if any(ypp_fields.values()) else 'NO_MATCHED_CFBD_BOX_SCORES',
                         'as_of_utc':at.isoformat(),'availability_basis':'BOX_SCORE_ROW_INGESTED_AT',
+                        'opponent_baseline_availability_basis':'ARCHIVED_OBSERVATION_TIMESTAMP',
                         'games_with_fields':sum(bool(fields) for fields in ypp_fields.values()),
                         'games_by_field':dict(Counter(key for fields in ypp_fields.values() for key in fields)),
                         **coverage}
