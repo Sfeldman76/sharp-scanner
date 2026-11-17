@@ -2548,7 +2548,8 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
         report['status']='MISSING_LIVE_IDENTITY_BOOK_OR_SPREAD';return empty,report
     fields={v['signal'] for v in rules.values()}
     report['live_signal_columns']=len(fields & set(live_rows.columns))
-    if not fields.intersection(live_rows.columns):
+    trace_big_al=reference_quote and any(rule['family']=='BIG_AL' for rule in rules.values())
+    if not fields.intersection(live_rows.columns) and not trace_big_al:
         report['status']='QUALIFIED_RULE_FIELDS_NOT_PUBLISHED';return empty,report
     live=live_rows.copy()
     if 'Sport' in live.columns:
@@ -2571,6 +2572,7 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
     live['_spread']=pd.to_numeric(live['Value'],errors='coerce')
     at=_timestamp(now or datetime.now(timezone.utc))
     dedup={}
+    big_al_checks={}
     for _,r in board.iterrows():
         selected=_norm_team(r.get('Selected_Team'))
         (home,away),oriented=_matchup_teams(r)
@@ -2597,6 +2599,33 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
         report['matched_games']+=1
         for rule in rules.values():
             field=rule['signal']
+            if reference_quote and rule['family']=='BIG_AL':
+                if field not in hits.columns:
+                    report['big_al_flag_column_missing']=field
+                for _,hit in hits.iterrows():
+                    if hit['_side'] not in (home,away):
+                        continue
+                    expected=chosen_spread if hit['_side']==selected else -chosen_spread
+                    if pd.isna(hit['_spread']) or abs(hit['_spread']-expected)>.001:
+                        continue
+                    phase=_price(r.get('V55_Is_Regular_Season'))
+                    side_phase=_price(hit.get('V55_Is_Regular_Season'))
+                    ready=_price(hit.get(rule['ready_field']))
+                    flag=_price(hit.get(field))
+                    if phase!=1 or side_phase!=1:
+                        reason='regular_season_unverified'
+                    elif ready is None:
+                        reason='readiness_missing'
+                    elif ready!=1:
+                        reason='readiness_false'
+                    elif flag is None:
+                        reason='ready_flag_missing'
+                    elif flag==1:
+                        reason='ready_flag_true'
+                    else:
+                        reason='ready_flag_false'
+                    key=(gid,hit['_side'],book,hit['V55_Original_Quote_Timestamp'])
+                    big_al_checks[key]=reason
             if field not in hits.columns:continue
             research_only=rule.get('historical_screen_only') is True
             if reference_quote and not research_only:
@@ -2638,6 +2667,14 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
                 if key not in dedup or hit['_obs']>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=record
     emit=list(dedup.values())
     report['qualified_events']=len(emit)
+    if big_al_checks:
+        from collections import Counter
+        counts=Counter(big_al_checks.values())
+        report['big_al_input_readiness']={'distinct_verified_quote_sides':len(big_al_checks),
+            'verified_regular_season_sides':len(big_al_checks)-counts['regular_season_unverified'],
+            'rule_ready_sides':sum(counts[name] for name in (
+                'ready_flag_missing','ready_flag_true','ready_flag_false')),
+            'sides_by_status':dict(counts)}
     for x in emit:
         fam=x['Source_Family'];report['qualified_by_brain'][fam]=report['qualified_by_brain'].get(fam,0)+1
     report['status']='PASS' if emit else 'NO_MATCHING_QUALIFIED_PREGAME_RULE_FIRINGS'

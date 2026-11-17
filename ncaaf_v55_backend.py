@@ -1784,7 +1784,7 @@ V55_RECOVERED_MARKET_PRODUCER = 'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW'
 V55_LIBRARY_MINER_PRODUCER = 'V55_FROZEN_LIBRARY_MARKET_SHADOW'
 
 
-def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days):
+def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_limit=0):
     """Find the published opener on the exact current scanner quote."""
     from google.cloud import bigquery
     from ncaaf_v55_board import _norm_team
@@ -1829,19 +1829,77 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days):
         home,away=fixtures[gid]
         wanted[(home,away,m,home if m=='spreads' else 'OVER',*key[2:])]=key
     candidates=defaultdict(set)
-    for row in bq_client.query(sql,job_config=cfg).result():
+    def opener_key(row):
         m=market(row['Market'])
-        side=_norm_team(row['Outcome']) if m=='spreads' else s(row['Outcome']).upper().split()[0] if s(row['Outcome']) else ''
-        key=(_norm_team(row['Home_Team_Norm']),_norm_team(row['Away_Team_Norm']),m,side,
-             row['book'],num(row['Value']),num(row['Odds_Price']),clock(row['Snapshot_Timestamp']),
-             clock(row['Game_Start']))
+        outcome=s(row['Outcome'])
+        side=_norm_team(outcome) if m=='spreads' else outcome.upper().split()[0] if outcome else ''
+        return (_norm_team(row['Home_Team_Norm']),_norm_team(row['Away_Team_Norm']),m,side,
+                row['book'],num(row['Value']),num(row['Odds_Price']),clock(row['Snapshot_Timestamp']),
+                clock(row['Game_Start']))
+
+    for row in bq_client.query(sql,job_config=cfg).result():
+        key=opener_key(row)
         opener=num(row['Open_Value'])
         if key in wanted and opener is not None:
             candidates[wanted[key]].add(opener)
     matched={key:next(iter(lines)) for key,lines in candidates.items() if len(lines)==1}
-    return matched,{'status':'PASS' if matched else 'NO_EXACT_PUBLISHED_OPENERS',
-                    'matched_quotes':len(matched),
-                    'conflicting_openers':sum(len(lines)>1 for lines in candidates.values())}
+    audit={'status':'PASS' if matched else 'NO_EXACT_PUBLISHED_OPENERS',
+           'matched_quotes':len(matched),
+           'conflicting_openers':sum(len(lines)>1 for lines in candidates.values()),
+           'quotes_searched':len(wanted)}
+    if trace_limit and len(matched)<len(wanted):
+        try:
+            sample=[(k,v) for k,v in sorted(wanted.items(),key=lambda item: item[1][0])
+                    if v not in matched][:trace_limit]
+            trace_sql=sql.replace('Snapshot_Timestamp BETWEEN @first AND @now AND Open_Value IS NOT NULL',
+                """Snapshot_Timestamp BETWEEN TIMESTAMP_SUB(@first, INTERVAL 7 DAY) AND @now
+               AND DATE(Game_Start) IN UNNEST(@sample_dates)""")
+            # Include nearby kickoff versions by calendar date to show time-key
+            # mismatches without requiring every raw quote onto the production join.
+            dates=sorted({k[-1].date()+timedelta(days=d) for k,_ in sample for d in (-1,0,1) if k[-1]})
+            trace_cfg=bigquery.QueryJobConfig(query_parameters=[
+                *cfg.query_parameters,bigquery.ArrayQueryParameter('sample_dates','DATE',dates)])
+            sample_keys={k[:3] for k,_ in sample}
+            rows_by_game=defaultdict(list)
+            for row in bq_client.query(trace_sql,job_config=trace_cfg).result():
+                actual=opener_key(row)
+                if actual[:3] not in sample_keys:
+                    continue
+                rows_by_game[actual[:3]].append((actual,num(row['Open_Value'])))
+            traces=[]
+            fields=('home','away','market','outcome','book','spread','odds','snapshot_utc','kickoff_utc')
+            comparison_fields=fields[3:]
+            for key, identity in sample:
+                rows=rows_by_game[key[:3]]
+                exact=[(actual,opening) for actual,opening in rows if actual==key]
+                source_openers=[(actual,opening) for actual,opening in rows if opening is not None]
+                wanted_book=[(actual,opening) for actual,opening in source_openers
+                             if actual[3]==key[3] and actual[4]==key[4]]
+                def differences(actual):
+                    return tuple(name for name,x,y in zip(comparison_fields, actual[3:],key[3:]) if x!=y)
+
+                mismatches=Counter('+'.join(differences(actual)) or 'EXACT'
+                                   for actual,_ in source_openers)
+                nearest=sorted(wanted_book,key=lambda row:(
+                    len(differences(row[0])),
+                    abs((row[0][-2]-key[-2]).total_seconds()) if row[0][-2] and key[-2] else float('inf')))[:2]
+                traces.append({'game_id':identity[0],
+                    'scanner_quote':dict(zip(fields,key)),
+                    'source_game_market_rows':len(rows),
+                    'exact_source_quote_rows':len(exact),
+                    'exact_source_quote_rows_with_opener':sum(opening is not None for _,opening in exact),
+                    'source_opener_rows':len(source_openers),
+                    'same_book_and_side_opener_rows':len(wanted_book),
+                    'opener_row_key_differences':dict(mismatches.most_common(12)),
+                    'nearest_same_book_opener_rows':[
+                        {'quote':dict(zip(fields,actual)),'recorded_open_value':opening,
+                         'different_fields':differences(actual)} for actual,opening in nearest]})
+            audit['unmatched_quote_trace']={'status':'PASS','lookback_days_before_first_quote':7,
+                                            'sampled_quotes':len(traces),'quotes':traces}
+        except Exception as exc:
+            audit['unmatched_quote_trace']={'status':'HOLD_OPENER_TRACE_QUERY_FAILED',
+                                            'error':type(exc).__name__+':'+str(exc)[:240]}
+    return matched,audit
 
 
 def _v55_published_miner_library(storage_client, bucket):
@@ -2213,7 +2271,7 @@ def _v55_expert_pathi_key_rows(source, board, utils, *, bq_client, at, horizon_d
             'line':num(row['Value']),'odds':num(row['Odds_Price']),
             'quote_observed_at_utc':row['Snapshot_Timestamp'],'kickoff_utc':row['Game_Start']})
     openers,audit=v55_observed_openers(bq_client,list(fixtures.values()),home_quotes,
-                                        now=at,horizon_days=horizon_days)
+                                        now=at,horizon_days=horizon_days,trace_limit=8)
     home_open={key[0]:value for key,value in openers.items()}
     ready=source.loc[source['V55_Quote_Game_ID'].map(s).isin(home_open)].copy()
     if ready.empty:
