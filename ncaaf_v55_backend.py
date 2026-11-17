@@ -20,6 +20,19 @@ POLICY='V55-UNIFIED-SEVEN-BRAIN-VALIDATED-BETTING-EDGE-20261106-R1'
 POLICY_STATUS='OOS_VALIDATED_BETTING_EDGE_AUTHORITY'
 V55_EXECUTION_QUOTE_MAX_AGE_MINUTES=24*60
 V55_EXECUTION_QUOTE_MAX_AGE=timedelta(minutes=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES)
+# Named outputs already calculated by the CFBD pregame feature loader.
+# The frozen atom provider reads these exact names and orientations.
+V55_MINER_PREGAME_FIELDS=frozenset((
+    'CFBD_Matchup_Elo_Adv',
+    'CFBD_Matchup_Talent_Adv','CFBD_Matchup_Talent_Rank_Adv','CFBD_Talent_Rank',
+    'CFBD_Matchup_Recruit_Adv','CFBD_Matchup_Recruit_Rank_Adv',
+    'CFBD_Matchup_PriorYear_SP_Adv','CFBD_Matchup_PriorYear_SRS_Adv',
+    'CFBD_Matchup_PriorYear_FPI_Adv','CFBD_Matchup_PriorYear_CORE_Adv',
+    'CFBD_Matchup_Net_PPA_Adv','CFBD_Matchup_Net_Success_Adv',
+    'CFBD_Matchup_Net_Explosiveness_Adv','CFBD_Matchup_EarlyDown_PPA_Adv',
+    'CFBD_Matchup_PPA_Per_Drive_Adv','CFBD_Matchup_Scoring_Opp_Rate_Adv',
+    'CFBD_Prior_Top3_Usage_Share',
+))
 BRAINS=frozenset(('CORE','STAT','SYSTEM_MINER','PATHI','BIG_AL','PREDICTION_TRACKER','MARKET_RICH'))
 
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False,default=str).encode()).hexdigest()
@@ -767,8 +780,10 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
     # Project every verified numeric team prior supplied by the forward
     # reader to Miner. The ML feature vector still uses the requested fields.
     cfbd_rows=list(cfbd_rows)
-    available_priors=sorted({key for r in cfbd_rows if isinstance(r,dict)
-                             for key in r if key.endswith('_Prior')})
+    available_priors=sorted({key for r in cfbd_rows if isinstance(r,dict) for key in r
+                             if key.endswith('_Prior') or key in V55_MINER_PREGAME_FIELDS})
+    exact_fields=V55_MINER_PREGAME_FIELDS & set(available_priors)
+    exact_field_coverage=Counter()
     for r in board_rows:
         if not isinstance(r,dict):holds['INVALID_BOARD_ROW']+=1;continue
         board_input_fields.update(r.keys())
@@ -912,6 +927,7 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         if not (any(math.isfinite(v) for v in features.values()) or
                 any(num(hr.get(c)) is not None for c in available_priors if c not in priors)):
             holds['NO_NUMERIC_PREGAME_PRIORS']+=1;continue
+        exact_field_coverage.update(c for c in exact_fields if num(hr.get(c)) is not None)
         out.append({'game_id':board_id,'cfbd_game_id':source_id,
                     'feature_asof_utc':snapshot_time.isoformat(),
                     'feature_read_at_utc':now.isoformat(),
@@ -938,6 +954,10 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                 'source_rows':len(cfbd_rows),
                 'future_source_fixture_groups':len(fixtures),
                 'feature_games':len(out),'prior_columns_required':len(priors),
+                'miner_exact_pregame_field_coverage':{
+                    c:{'present_in_forward_rows':c in exact_fields,
+                       'matched_games_with_home_value':exact_field_coverage[c]}
+                    for c in sorted(V55_MINER_PREGAME_FIELDS)},
                 'verified_market_placeholder_links':verified_placeholder_links,
                 'past_cfbd_placeholder_date_links':past_source_placeholder_links,
                 'cfbd_school_alias_version':'V55_CFBD_EXPLICIT_SCHOOL_ALIAS_20261110',
@@ -978,7 +998,8 @@ def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=No
         # The ML feature schema is only a subset of the published Miner's
         # inputs. Read available numeric priors from the approved source.
         priors.update(f.name for f in table.schema
-                      if f.name.endswith('_Prior') and f.field_type.upper() in
+                      if (f.name.endswith('_Prior') or f.name in V55_MINER_PREGAME_FIELDS)
+                      and f.field_type.upper() in
                       ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC','BOOLEAN','BOOL'))
     wanted=['Game_ID','Team_Key','Is_Home','Game_Date','Season','Week']+optional+sorted(priors)
     sql=('SELECT '+','.join('`'+c+'`' for c in wanted)+f' FROM `{table_id}` '
@@ -2872,7 +2893,8 @@ def _v55_replay_miner_history(bq, games, team_map, rules, evaluate_atoms, grades
         try:
             fields={f.name:f.field_type.upper() for f in bq.get_table(table).schema}
             required={'Game_ID','Game_Date','Team_Key'}
-            columns=sorted(c for c,t in fields.items() if c.startswith('CFBD_') and c.endswith('_Prior')
+            columns=sorted(c for c,t in fields.items()
+                           if (c.startswith('CFBD_') and c.endswith('_Prior') or c in V55_MINER_PREGAME_FIELDS)
                            and t in ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC','BOOLEAN','BOOL'))
             if not required<=fields.keys() or not columns:
                 source_audits[table]={'status':'HISTORICAL_PRIOR_COLUMNS_UNAVAILABLE'}
