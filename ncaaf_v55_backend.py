@@ -1784,8 +1784,9 @@ V55_RECOVERED_MARKET_PRODUCER = 'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW'
 V55_LIBRARY_MINER_PRODUCER = 'V55_FROZEN_LIBRARY_MARKET_SHADOW'
 
 
-def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_limit=0):
-    """Find the published opener on the exact current scanner quote."""
+def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_limit=0,
+                        as_of=False):
+    """Read explicit openers on the exact quote, or from earlier same-book rows."""
     from google.cloud import bigquery
     from ncaaf_v55_board import _norm_team
 
@@ -1804,9 +1805,11 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_l
     quoted=[ts for ts in quoted if ts]
     if not quoted:
         return {},{'status':'NO_VERIFIED_QUOTES'}
+    lookback_days=21 if as_of else 0
+    first=min(quoted)-timedelta(days=lookback_days)
     cfg=bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter('now','TIMESTAMP',now),
-        bigquery.ScalarQueryParameter('first','TIMESTAMP',min(quoted)),
+        bigquery.ScalarQueryParameter('first','TIMESTAMP',first),
         bigquery.ScalarQueryParameter('days','INT64',horizon_days)])
     sql=f"""SELECT Game_Start, Home_Team_Norm, Away_Team_Norm, Market, Outcome,
                     Snapshot_Timestamp, Value, Odds_Price, Open_Value, {book_sql} AS book
@@ -1837,22 +1840,49 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_l
                 row['book'],num(row['Value']),num(row['Odds_Price']),clock(row['Snapshot_Timestamp']),
                 clock(row['Game_Start']))
 
+    as_of_targets=defaultdict(list)
+    if as_of:
+        for key, identity in wanted.items():
+            # Ordered fixture and kickoff identify the event. Book and outcome
+            # keep the opener on the same side of the same sportsbook market.
+            as_of_targets[(*key[:5],key[-1])].append((key,identity))
+    exact_matches=set()
     for row in bq_client.query(sql,job_config=cfg).result():
         key=opener_key(row)
         opener=num(row['Open_Value'])
-        if key in wanted and opener is not None:
-            candidates[wanted[key]].add(opener)
+        if opener is None:
+            continue
+        if not as_of:
+            if key in wanted:
+                candidates[wanted[key]].add(opener)
+            continue
+        captured=key[-2]
+        if not (captured and key[-1] and first<=captured<key[-1] and captured<=now):
+            continue
+        for expected, identity in as_of_targets.get((*key[:5],key[-1]),()):
+            if expected[-2] is None or captured>expected[-2]:
+                continue
+            candidates[identity].add(opener)
+            if key==expected:
+                exact_matches.add(identity)
     matched={key:next(iter(lines)) for key,lines in candidates.items() if len(lines)==1}
-    audit={'status':'PASS' if matched else 'NO_EXACT_PUBLISHED_OPENERS',
+    audit={'status':'PASS' if matched else ('NO_AS_OF_PUBLISHED_OPENERS' if as_of
+                                           else 'NO_EXACT_PUBLISHED_OPENERS'),
            'matched_quotes':len(matched),
            'conflicting_openers':sum(len(lines)>1 for lines in candidates.values()),
            'quotes_searched':len(wanted)}
+    if as_of:
+        audit.update(join_policy='RECORDED_SAME_FIXTURE_BOOK_SIDE_AS_OF_QUOTE',
+                     opener_lookback_days=lookback_days,
+                     matched_without_exact_current_snapshot=len(matched.keys()-exact_matches),
+                     missing_opener_quotes=len(wanted)-len(candidates))
     if trace_limit and len(matched)<len(wanted):
         try:
             sample=[(k,v) for k,v in sorted(wanted.items(),key=lambda item: item[1][0])
                     if v not in matched][:trace_limit]
+            trace_first='@first' if as_of else 'TIMESTAMP_SUB(@first, INTERVAL 7 DAY)'
             trace_sql=sql.replace('Snapshot_Timestamp BETWEEN @first AND @now AND Open_Value IS NOT NULL',
-                """Snapshot_Timestamp BETWEEN TIMESTAMP_SUB(@first, INTERVAL 7 DAY) AND @now
+                f"""Snapshot_Timestamp BETWEEN {trace_first} AND @now
                AND DATE(Game_Start) IN UNNEST(@sample_dates)""")
             # Include nearby kickoff versions by calendar date to show time-key
             # mismatches without requiring every raw quote onto the production join.
@@ -1894,7 +1924,7 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_l
                     'nearest_same_book_opener_rows':[
                         {'quote':dict(zip(fields,actual)),'recorded_open_value':opening,
                          'different_fields':differences(actual)} for actual,opening in nearest]})
-            audit['unmatched_quote_trace']={'status':'PASS','lookback_days_before_first_quote':7,
+            audit['unmatched_quote_trace']={'status':'PASS','lookback_days_before_first_quote':lookback_days if as_of else 7,
                                             'sampled_quotes':len(traces),'quotes':traces}
         except Exception as exc:
             audit['unmatched_quote_trace']={'status':'HOLD_OPENER_TRACE_QUERY_FAILED',
@@ -2271,12 +2301,16 @@ def _v55_expert_pathi_key_rows(source, board, utils, *, bq_client, at, horizon_d
             'line':num(row['Value']),'odds':num(row['Odds_Price']),
             'quote_observed_at_utc':row['Snapshot_Timestamp'],'kickoff_utc':row['Game_Start']})
     openers,audit=v55_observed_openers(bq_client,list(fixtures.values()),home_quotes,
-                                        now=at,horizon_days=horizon_days,trace_limit=8)
-    home_open={key[0]:value for key,value in openers.items()}
-    ready=source.loc[source['V55_Quote_Game_ID'].map(s).isin(home_open)].copy()
+                                        now=at,horizon_days=horizon_days,trace_limit=8,as_of=True)
+    home_open={(key[0],key[2],key[-1]):value for key,value in openers.items()}
+    ready=source.copy()
+    quote_keys=zip(ready['V55_Quote_Game_ID'].map(s),ready['V55_Quote_Book'],
+                  ready['Game_Start'].map(clock))
+    ready['V55_Recorded_Opening_Spread']=[home_open.get(key) for key in quote_keys]
+    ready=ready.loc[ready['V55_Recorded_Opening_Spread'].notna()].copy()
     if ready.empty:
         return ready,audit
-    opening=ready['V55_Quote_Game_ID'].map(s).map(home_open)
+    opening=ready['V55_Recorded_Opening_Spread']
     home=ready['Outcome'].map(_norm_team).eq(ready['Home_Team_Norm'].map(_norm_team))
     ready['V55_Recorded_Opening_Spread']=opening.where(home,-opening)
     ready['First_Line_Value']=ready['V55_Recorded_Opening_Spread']
@@ -2285,7 +2319,8 @@ def _v55_expert_pathi_key_rows(source, board, utils, *, bq_client, at, horizon_d
     if not isinstance(ready,pd.DataFrame) or not {
             V55_PATHI_KEY_RULE,'Pathi_FB_Key_DataReady','V55_Recorded_Opening_Spread'}.issubset(ready):
         raise RuntimeError('PATHI_DIRECTIONAL_KEY_FIELDS_MISSING')
-    audit['games_with_recorded_opener']=len(home_open)
+    audit['games_with_recorded_opener']=len({key[0] for key in home_open})
+    audit['game_book_pairs_with_recorded_opener']=len(home_open)
     return ready,audit
 
 
