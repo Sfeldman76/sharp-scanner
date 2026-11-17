@@ -2573,6 +2573,7 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
     at=_timestamp(now or datetime.now(timezone.utc))
     dedup={}
     big_al_checks={}
+    missing_big_al_flags=set()
     for _,r in board.iterrows():
         selected=_norm_team(r.get('Selected_Team'))
         (home,away),oriented=_matchup_teams(r)
@@ -2601,7 +2602,7 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
             field=rule['signal']
             if reference_quote and rule['family']=='BIG_AL':
                 if field not in hits.columns:
-                    report['big_al_flag_column_missing']=field
+                    missing_big_al_flags.add(field)
                 for _,hit in hits.iterrows():
                     if hit['_side'] not in (home,away):
                         continue
@@ -2625,7 +2626,7 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
                     else:
                         reason='ready_flag_false'
                     key=(gid,hit['_side'],book,hit['V55_Original_Quote_Timestamp'])
-                    big_al_checks[key]=reason
+                    big_al_checks.setdefault(rule['id'],{})[key]=reason
             if field not in hits.columns:continue
             research_only=rule.get('historical_screen_only') is True
             if reference_quote and not research_only:
@@ -2669,12 +2670,20 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
     report['qualified_events']=len(emit)
     if big_al_checks:
         from collections import Counter
-        counts=Counter(big_al_checks.values())
-        report['big_al_input_readiness']={'distinct_verified_quote_sides':len(big_al_checks),
-            'verified_regular_season_sides':len(big_al_checks)-counts['regular_season_unverified'],
-            'rule_ready_sides':sum(counts[name] for name in (
-                'ready_flag_missing','ready_flag_true','ready_flag_false')),
-            'sides_by_status':dict(counts)}
+        readiness={}
+        for sid,checks in big_al_checks.items():
+            counts=Counter(checks.values())
+            readiness[sid]={'distinct_verified_quote_sides':len(checks),
+                'verified_regular_season_sides':len(checks)-counts['regular_season_unverified'],
+                'rule_ready_sides':sum(counts[name] for name in (
+                    'ready_flag_missing','ready_flag_true','ready_flag_false')),
+                'sides_by_status':dict(counts)}
+        report['big_al_input_readiness_by_rule']=readiness
+        revenge='BigAl_CF2_LateSeasonRevengeDog'
+        if revenge in readiness:
+            report['big_al_input_readiness']=readiness[revenge]
+    if missing_big_al_flags:
+        report['missing_big_al_flag_columns']=sorted(missing_big_al_flags)
     for x in emit:
         fam=x['Source_Family'];report['qualified_by_brain'][fam]=report['qualified_by_brain'].get(fam,0)+1
     report['status']='PASS' if emit else 'NO_MATCHING_QUALIFIED_PREGAME_RULE_FIRINGS'

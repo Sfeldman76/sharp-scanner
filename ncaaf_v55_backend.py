@@ -764,6 +764,11 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
     board_input_fields=set()
     priors=sorted({name[len('CFBD_DIFF_'):] for name in required_features
                    if name.startswith('CFBD_DIFF_') and name.endswith('_Prior')})
+    # Project every verified numeric team prior supplied by the forward
+    # reader to Miner. The ML feature vector still uses the requested fields.
+    cfbd_rows=list(cfbd_rows)
+    available_priors=sorted({key for r in cfbd_rows if isinstance(r,dict)
+                             for key in r if key.endswith('_Prior')})
     for r in board_rows:
         if not isinstance(r,dict):holds['INVALID_BOARD_ROW']+=1;continue
         board_input_fields.update(r.keys())
@@ -904,8 +909,9 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         features={}
         for c in priors:
             hv=num(hr[c]);av=num(ar[c]);features['CFBD_DIFF_'+c]=(hv-av if hv is not None and av is not None else float('nan'))
-        if not any(math.isfinite(v) for v in features.values()):
-            holds['NO_NUMERIC_PRIOR_DIFFERENCES']+=1;continue
+        if not (any(math.isfinite(v) for v in features.values()) or
+                any(num(hr.get(c)) is not None for c in available_priors if c not in priors)):
+            holds['NO_NUMERIC_PREGAME_PRIORS']+=1;continue
         out.append({'game_id':board_id,'cfbd_game_id':source_id,
                     'feature_asof_utc':snapshot_time.isoformat(),
                     'feature_read_at_utc':now.isoformat(),
@@ -915,8 +921,8 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                     # Preserve exact independently oriented team priors for the
                     # full-history Miner V5 (ML sees only aggregate differences).
                     'team_side_features':{
-                        'HOME':{c:hr.get(c) for c in priors},
-                        'AWAY':{c:ar.get(c) for c in priors}},
+                        'HOME':{c:hr.get(c) for c in available_priors},
+                        'AWAY':{c:ar.get(c) for c in available_priors}},
                     'source':'EXISTING_CFBD_MINER_PREKICK_PRIORS_READ_TIME_SHADOW',
                     'identity_match_method':method,
                     'feature_vintage_verified':vintage_verified,
@@ -943,7 +949,7 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                 'holds':dict(holds),'bet_authority':0}
 
 
-def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=None):
+def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=None, include_miner_priors=False):
     """Read existing miner prior features only for future 2026 fixtures.
 
     Game_Date is a KICKOFF, not a feature capture. An un-timestamped source
@@ -968,6 +974,12 @@ def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=No
     if not now:raise ValueError('NOW_MUST_BE_TIMEZONE_AWARE')
     optional=[c for c in ('feature_asof_utc','Feature_AsOf_UTC','Is_Regular_Season',
                           'Season_Type','Game_Type','Season_Stage') if c in fields]
+    if include_miner_priors:
+        # The ML feature schema is only a subset of the published Miner's
+        # inputs. Read available numeric priors from the approved source.
+        priors.update(f.name for f in table.schema
+                      if f.name.endswith('_Prior') and f.field_type.upper() in
+                      ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC','BOOLEAN','BOOL'))
     wanted=['Game_ID','Team_Key','Is_Home','Game_Date','Season','Week']+optional+sorted(priors)
     sql=('SELECT '+','.join('`'+c+'`' for c in wanted)+f' FROM `{table_id}` '
          # Include a bounded earlier CFBD midnight sentinel so an actual
@@ -1147,6 +1159,7 @@ V55_PROSPECTIVE_PRODUCER_TAG='V55_FROZEN_EXPERT_ORIGIN_CAPTURE_20261110_V1'
 V55_HISTORICAL_EXPERT_PRODUCER_TAG='V55_EXACT_EXPERT_RESEARCH_CAPTURE'
 V55_BIG_AL_REVENGE_RULE='BigAl_CF2_LateSeasonRevengeDog'
 V55_PATHI_KEY_RULE='Pathi_FB_Crossed_Key_Toward_Team'
+V55_PATHI_MOVEMENT_RECIPE_IDS=frozenset((V55_PATHI_KEY_RULE,'Pathi_FB_Crossed_Key_Away_From_Team'))
 V55_EXPERT_REFERENCE_RULES=frozenset((('BIG_AL',V55_BIG_AL_REVENGE_RULE),
                                      ('PATHI',V55_PATHI_KEY_RULE)))
 
@@ -1182,10 +1195,12 @@ def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *,
         if fam not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER') or not rule:
             holds['FROZEN_RULE_ID_NOT_VERIFIED']+=1;continue
         research_only=rule.get('historical_screen_only') is True
-        reference=reference_quote and research_only and (fam,sid) in V55_EXPERT_REFERENCE_RULES
+        reference=reference_quote and research_only and (
+            (fam,sid) in V55_EXPERT_REFERENCE_RULES or rule.get('saved_directional_catalog') is True)
         if reference_quote and not reference:
             holds['RULE_NOT_ELIGIBLE_FOR_RESEARCH_REFERENCE']+=1;continue
-        pathi_key=fam=='PATHI' and (sid==V55_PATHI_KEY_RULE or rule['signal']==V55_PATHI_KEY_RULE)
+        pathi_key=fam=='PATHI' and (
+            sid in V55_PATHI_MOVEMENT_RECIPE_IDS or rule['signal'] in V55_PATHI_MOVEMENT_RECIPE_IDS)
         opener=num(e.get('V55_Recorded_Opening_Spread'))
         if pathi_key and opener is None:
             holds['NO_RECORDED_PATHI_OPENING_SPREAD']+=1;continue
@@ -1282,6 +1297,8 @@ def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *,
             'historical_betting_roi_certified':False})
         if reference:
             out[-1].update(bet_authority=0,research_reference_quote=True)
+            if rule.get('saved_directional_catalog') is True:
+                out[-1]['saved_directional_catalog']=True
         if pathi_key:
             out[-1]['trigger_opening_spread']=opener
     return out,{'status':'PROSPECTIVE_RULE_FIRINGS_PREPARED' if out else 'NO_VERIFIED_PROSPECTIVE_RULE_FIRINGS',
@@ -2010,7 +2027,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     if bq_client is not None:
         try:
             openers,audit['opening_quotes']=v55_observed_openers(
-                bq_client,board_rows,paired,now=at,horizon_days=horizon_days)
+                bq_client,board_rows,paired,now=at,horizon_days=horizon_days,as_of=True)
         except Exception as exc:
             audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
                                      'error':type(exc).__name__+':'+str(exc)[:200]}
@@ -2018,6 +2035,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         market_rules=[r for r in rules if r['market']==mkt]
         stats={'rules':len(market_rules),'source_games':0,'fired':0,'not_met':0,
                'missing_inputs':0,'already_captured':0}
+        rule_stats={r['rule_id']:Counter() for r in market_rules}
+        rule_missing={r['rule_id']:Counter() for r in market_rules}
         audit['by_market'][mkt]=stats
         missing=Counter()
         for (gid,game_market),(_,sides) in pairs.items():
@@ -2034,14 +2053,17 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
                        Season=fixture.get('Season'),Week=fixture.get('Week'),
                        Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
-            if mkt=='spreads':
-                row['Current_Spread']=base['line']
-            elif mkt=='totals':
-                row['Current_Total']=base['line']
-            opener=openers.get((gid,mkt,base['book'],base['line'],base['odds'],
-                                clock(base['quote_observed_at_utc']),kickoff))
-            if opener is not None and mkt in ('spreads','totals'):
-                row['Opening_Spread' if mkt=='spreads' else 'Opening_Total']=opener
+            for companion_market,side,suffix in (('spreads','HOME','Spread'),('totals','OVER','Total')):
+                companion=books.get((gid,companion_market,base['book']),{})
+                current=companion.get(side)
+                if len(companion)!=2 or not current or any(
+                        clock(q.get('kickoff_utc'))!=kickoff for q in companion.values()):
+                    continue
+                row['Current_'+suffix]=current['line']
+                opener=openers.get((gid,companion_market,current['book'],current['line'],
+                                    current['odds'],clock(current['quote_observed_at_utc']),kickoff))
+                if opener is not None:
+                    row['Opening_'+suffix]=opener
             # Do not map current quotes into opening fields. Venue atoms
             # require a verified site role, which this fixture feed lacks.
             atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
@@ -2049,14 +2071,19 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 market=mkt,enforce_support_floor=False)}
             stats['source_games']+=1
             for rule in market_rules:
+                rid=rule['rule_id']
                 unavailable=[name for name in rule['atoms'] if name not in atoms]
                 if unavailable:
                     stats['missing_inputs']+=1
+                    rule_stats[rid]['missing_inputs']+=1
                     missing.update(unavailable)
+                    rule_missing[rid].update(unavailable)
                     continue
                 if not all(atoms[name] for name in rule['atoms']):
                     stats['not_met']+=1
+                    rule_stats[rid]['not_met']+=1
                     continue
+                rule_stats[rid]['fired']+=1
                 target=('OVER' if rule['direction']=='PLAY_ON' else 'UNDER') if mkt=='totals' else (
                     'HOME' if rule['direction']=='PLAY_ON' else 'AWAY')
                 q=sides[target]
@@ -2080,6 +2107,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                         'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(exact[:-1]),
                     'qualification_level':'HISTORICAL_SCREEN_ONLY','capture_id':cid,'bet_authority':0})
         stats['missing_atoms']=dict(missing)
+        stats['rules_by_id']={rid:{**counts,'missing_atoms':dict(rule_missing[rid])}
+                              for rid,counts in rule_stats.items()}
     captured,capture_audit=persist_v55_prospective_events(prepared,storage_client,bucket,now=at)
     audit['capture']=capture_audit
     return captured,audit
@@ -2324,6 +2353,56 @@ def _v55_expert_pathi_key_rows(source, board, utils, *, bq_client, at, horizon_d
     return ready,audit
 
 
+def _v55_saved_expert_recipes(storage_client,bucket,utils):
+    """Reuse published named-side research recipes with an existing evaluator."""
+    path='research/ncaaf/v55/brain_refresh/cfbd_expert_directional_cache_latest.json'
+    allowed={
+        'BIG_AL':{name for name in getattr(utils,'BIGAL_EXACT_SIGNAL_COLS',())
+                  if name.startswith(('BigAl_CF1_','BigAl_CF2_','BigAl_CF3_'))},
+        'PATHI':set(getattr(utils,'PATHI_KEY_EVENT_COLS',())) & V55_PATHI_MOVEMENT_RECIPE_IDS,
+    }
+    rules={}
+    holds={}
+    try:
+        raw=storage_client.bucket(bucket).blob(path).download_as_bytes()
+        cache=json.loads(raw)
+        if not isinstance(cache,dict):
+            raise ValueError('INVALID_SAVED_EXPERT_CATALOG')
+        audit={'status':'SAVED_DIRECTIONAL_CATALOG_READ','uri':'gs://'+bucket+'/'+path,
+               'catalog_sha256':hashlib.sha256(raw).hexdigest()}
+        for sid,entry in cache.items():
+            if not isinstance(entry,dict) or entry.get('role')!='directional':
+                continue
+            fam=family(entry.get('family'))
+            if fam not in allowed:
+                continue
+            if sid not in allowed[fam]:
+                holds[fam+'|'+sid]='NO_EXACT_DIRECTIONAL_LIVE_FEATURE_MAPPING'
+            elif not entry.get('occurrences'):
+                holds[fam+'|'+sid]='NO_SAVED_HISTORICAL_OCCURRENCES'
+            else:
+                rules[(fam,sid)]=True
+    except Exception as exc:
+        audit={'status':'HOLD_SAVED_EXPERT_CATALOG','uri':'gs://'+bucket+'/'+path,
+               'error':type(exc).__name__+':'+str(exc)[:180]}
+    # Preserve the two previously working, exact research recipes even if
+    # the saved cache cannot be read for this invocation.
+    for identity in V55_EXPERT_REFERENCE_RULES:
+        rules.setdefault(identity,False)
+    recipes={}
+    for (fam,sid),saved in sorted(rules.items()):
+        recipe={'family':fam,'id':sid,'signal':sid,'signal_type':'FLAG','direction':'PLAY_ON',
+                'key':fam+'|COLLEGE_FOOTBALL','historical_screen_only':True,
+                'ready_field':('Pathi_FB_Key_DataReady' if fam=='PATHI' else sid+'_DataReady')}
+        # Keep the two existing research rule hashes stable.
+        if saved and (fam,sid) not in V55_EXPERT_REFERENCE_RULES:
+            recipe['saved_directional_catalog']=True
+        recipes[(fam,sid)]=dict(recipe,report_sha256=sha(recipe))
+    audit.update(research_rule_ids=[fam+'|'+sid for fam,sid in recipes],held_rules=holds,
+                 bet_authority=0)
+    return recipes,audit
+
+
 def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
                                          bucket, now=None, log_func=None,
                                          bq_client=None, horizon_days=14):
@@ -2399,12 +2478,7 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
     audit['fresh_verified_regular_season_games']=fresh.loc[
         pd.to_numeric(fresh['V55_Is_Regular_Season'],errors='coerce').eq(1),'Game_ID'].nunique() if 'V55_Is_Regular_Season' in fresh else 0
     audit['research_reference_games']=qa['games']
-    research_rules={}
-    for fam,sid in sorted(V55_EXPERT_REFERENCE_RULES):
-        recipe={'family':fam,'id':sid,'signal':sid,'signal_type':'FLAG','direction':'PLAY_ON',
-                'key':fam+'|COLLEGE_FOOTBALL','historical_screen_only':True,
-                'ready_field':('Pathi_FB_Key_DataReady' if fam=='PATHI' else sid+'_DataReady')}
-        research_rules[(fam,sid)]=dict(recipe,report_sha256=sha(recipe))
+    research_rules,audit['saved_expert_catalog']=_v55_saved_expert_recipes(storage_client,bucket,utils)
     audit['historical_grading_rule_ids']=[rule['id'] for rule in research_rules.values()]
     prepared=[]
     scored_keys=set()
@@ -2412,7 +2486,8 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
         ('execution',False,fresh,live_rules),('research',True,sides,research_rules)):
         audit[label+'_rules']={}
         key_rules={k:v for k,v in rules.items() if k[0]=='PATHI'
-                   and (k[1]==V55_PATHI_KEY_RULE or v['signal']==V55_PATHI_KEY_RULE)}
+                   and (k[1] in V55_PATHI_MOVEMENT_RECIPE_IDS
+                        or v['signal'] in V55_PATHI_MOVEMENT_RECIPE_IDS)}
         for name,rows,scoped_rules in (
             ('expert',enriched,{k:v for k,v in rules.items() if k not in key_rules}),
             ('pathi_key',pathi_rows,key_rules)):
@@ -2558,7 +2633,12 @@ def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
                     (ev.get('producer')==V55_LIBRARY_MINER_PRODUCER and fam=='SYSTEM_MINER')
                     or (ev.get('producer')==V55_HISTORICAL_EXPERT_PRODUCER_TAG
                         and ev.get('research_reference_quote') is True
-                        and (fam,s(ev.get('system_id'))) in V55_EXPERT_REFERENCE_RULES
+                        and ((fam,s(ev.get('system_id'))) in V55_EXPERT_REFERENCE_RULES
+                             or (ev.get('saved_directional_catalog') is True
+                                 and ((fam=='BIG_AL' and s(ev.get('system_id')).startswith(
+                                     ('BigAl_CF1_','BigAl_CF2_','BigAl_CF3_')))
+                                      or (fam=='PATHI' and s(ev.get('system_id')) in
+                                          V55_PATHI_MOVEMENT_RECIPE_IDS))))
                         and (fam!='PATHI' or num(ev.get('trigger_opening_spread')) is not None))))
             if (fam not in BRAINS or not ident or capture!=uri+'#'+ident
                 or not quote_ref or not truth(ev.get('direction_verified'))
@@ -3559,7 +3639,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
             except Exception:
                 # Still score frozen ML features; Miner audit will show hold.
                 pass
-            source=read_live_cfbd_rows_from_bq(bq,feature_table,wanted)
+            source=read_live_cfbd_rows_from_bq(bq,feature_table,wanted,include_miner_priors=True)
             ml_feature_rows,feature_audit=build_live_cfbd_feature_snapshots(
                 board.to_dict('records'),source,wanted)
             feature_audit['source']=feature_table

@@ -456,7 +456,8 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
             'cfbd_prior_difference_fields':sum(x.startswith('CFBD_DIFF_') and x.endswith('_Prior') for x in needed),
             'non_cfbd_fields':sorted(x for x in needed if not x.startswith('CFBD_DIFF_'))[:75]}
         source=stage('forward_cfbd_source_columns',lambda:backend.read_live_cfbd_rows_from_bq(
-            bq,'sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1',needed,now=now))
+            bq,'sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1',needed,now=now,
+            include_miner_priors=True))
         if source is not None:
             feat=stage('feature_parity_and_game_join',lambda:backend.build_live_cfbd_feature_snapshots(
                 board.to_dict('records'),source,needed,now=now))
