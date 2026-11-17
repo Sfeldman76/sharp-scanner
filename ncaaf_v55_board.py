@@ -286,18 +286,19 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
             if col in frame.columns: frame[col]=None
         for col in VALID_BRAIN_FAMILIES:
             if col in frame.columns: frame[col]="STALE_BACKEND_SNAPSHOT"
-    # The board may still be fresh (<180m) after an individual bet quote has
-    # expired (our tighter 90m policy). Redact authority on READ in the backend;
-    # never make the dashboard itself infer bet permission from time fields.
+    # Expire an authorized quote independently of the board publication age.
     if not stale and "V55_Bet_Authority" in frame.columns:
-        quoted=pd.to_datetime(frame.get("Backend_Quote_Timestamp",
-                    pd.Series(index=frame.index,dtype="object")),utc=True,errors="coerce")
+        from ncaaf_v55_backend import V55_EXECUTION_QUOTE_MAX_AGE
+        missing=pd.Series(index=frame.index,dtype="object")
+        quoted=pd.to_datetime(frame.get("Backend_Quote_Timestamp",missing),utc=True,errors="coerce")
+        oldest=pd.to_datetime(frame.get("V55_Authority_Quote_Age_Basis_UTC",missing),
+                              utc=True,errors="coerce").fillna(quoted)
         kicks=pd.to_datetime(frame.get("Game_Start_UTC",
                     pd.Series(index=frame.index,dtype="object")),utc=True,errors="coerce")
         current=pd.Timestamp(_utcnow())
         expired=frame["V55_Bet_Authority"].eq(1) & (
             quoted.isna() | kicks.isna() | (quoted>current) |
-            (current-quoted>pd.Timedelta(minutes=V55_POLICY_MAX_QUOTE_AGE_MINUTES)) |
+            (current-oldest>V55_EXECUTION_QUOTE_MAX_AGE) |
             (kicks<=current))
         if expired.any():
             frame.loc[expired,"V55_Bet_Authority"]=0
@@ -1400,7 +1401,7 @@ def _v55_read_headless_miner_system_snapshot(*,storage_client=None,bucket_name=N
 # V55 DIRECT LIVE BRAINS — run the legacy *feature evaluators*, not legacy V1
 # scoring. The earlier V5.5 bridge only queried saved features from market
 # views; those views are not populated by the independent CORE execution path.
-def _v55_direct_current_quote_rows(board, market, *, now=None):
+def _v55_direct_current_quote_rows(board, market, *, now=None, exact_pair=False):
     """Select ONLY this board's verified sportsbook/book/side/line quote pairs.
 
     Do not evaluate unrelated stale book quotes, synthesize prices, or use a
@@ -1423,6 +1424,12 @@ def _v55_direct_current_quote_rows(board, market, *, now=None):
     alt=q.get('Book',pd.Series('',index=q.index)).fillna('').astype(str).str.lower().str.strip()
     q['_book']=bk.mask(bk.isin(('','nan','none')),alt)
     q['_spread']=pd.to_numeric(q['Value'],errors='coerce')
+    if exact_pair:
+        q['_odds']=pd.to_numeric(q.get('Odds_Price'),errors='coerce')
+        if 'Outcome_Norm' in q:
+            missing=q['_side'].eq('')
+            q.loc[missing,'Outcome']=q.loc[missing,'Outcome_Norm']
+            q.loc[missing,'_side']=q.loc[missing,'Outcome'].map(_norm_team)
     found=[]; games=0
     for _,r in board.iterrows():
         if not str(r.get('Quote_State') or '').startswith('FRESH_'):
@@ -1442,13 +1449,27 @@ def _v55_direct_current_quote_rows(board, market, *, now=None):
             &q['_obs'].le(anchor)&(anchor-q['_obs']).le(pd.Timedelta(minutes=15))]
         if parts.empty:continue
         chosen=[]
-        for side,spread in ((home,hv),(away,av)):
-            opt=parts.loc[parts['_side'].eq(side)&parts['_spread'].sub(spread).abs().le(.001)].sort_values('_obs',ascending=False)
+        for side,spread,label in ((home,hv,'Home'),(away,av,'Away')):
+            opt=parts.loc[parts['_side'].eq(side)&parts['_spread'].sub(spread).abs().le(.001)]
+            if exact_pair:
+                stamp=_timestamp(r.get('Backend_'+label+'_Quote_UTC'))
+                odds=_price(r.get('Backend_'+label+'_Odds_American'))
+                if pd.isna(stamp) or odds is None:
+                    chosen=[];break
+                opt=opt.loc[opt['_obs'].eq(stamp)&opt['_odds'].eq(odds)]
+                if opt['_kick'].nunique()!=1:
+                    chosen=[];break
             if opt.empty:chosen=[];break
-            hit=opt.iloc[0].copy()
+            hit=opt.sort_values('_obs',ascending=False).iloc[0].copy()
             hit['V55_Is_Regular_Season']=r.get('V55_Is_Regular_Season')
+            if exact_pair:
+                hit['V55_Quote_Game_ID']=r.get('Game_ID')
+                hit['V55_Quote_Book']=book
             chosen.append(hit)
         if len(chosen)!=2:continue
+        if exact_pair and (chosen[0]['_kick']!=chosen[1]['_kick'] or
+                           max(hit['_obs'] for hit in chosen)!=anchor):
+            continue
         if abs((chosen[0]['_obs']-chosen[1]['_obs']).total_seconds())>900:continue
         games+=1
         found.extend(chosen)
@@ -1585,19 +1606,21 @@ def _v55_evaluate_existing_live_systems(board, market, *, bq_client,
     return quote_rows,audit
 
 
-def _v55_live_quote_time_eligible(live_rows, quote_time, now):
+def _v55_live_quote_time_eligible(live_rows, quote_time, now, *, max_quote_age=None):
     """Allow post-quote live evaluation ONLY if its original price is recent.
 
     Original pre-quote archived signals continue under the legacy as-of rule.
     This guard prevents re-timestamping an old quote to invent betting authority.
     """
     import pandas as pd
+    if max_quote_age is None:
+        max_quote_age=pd.Timedelta(minutes=15)
     obs=pd.to_datetime(live_rows['Snapshot_Timestamp'],utc=True,errors='coerce')
     original=pd.to_datetime(live_rows.get('V55_Original_Quote_Timestamp',pd.Series(index=live_rows.index,dtype='object')),utc=True,errors='coerce')
     marked=live_rows.get('V55_Live_Computed_On_Current_Quote',pd.Series(False,index=live_rows.index)).fillna(False).eq(True)
     return (marked & original.notna() & original.le(quote_time)
             &(quote_time-original).le(pd.Timedelta(minutes=15))
-            &((now-quote_time)<=pd.Timedelta(minutes=15))
+            &((now-quote_time)<=max_quote_age)
             &obs.ge(quote_time)&obs.le(now)
             &(now-obs).le(pd.Timedelta(minutes=5)))
 
@@ -2493,7 +2516,8 @@ def read_v55_long_history_brain_registry(*, storage_client=None,bucket_name=None
         return None,'BRAIN_REGISTRY_UNAVAILABLE:'+type(exc).__name__
 
 
-def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
+def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None,
+                                      reference_quote=False, max_quote_age=None):
     """Re-evaluate Big Al, Pathi, STAT, PT on the CURRENT booked spread.
 
     No V1 model probabilities, historical 2026 outcomes, raw unnamed counts, or
@@ -2557,20 +2581,32 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
         gid=str(r.get('Game_ID') or '')
         if not (oriented and selected in (home,away) and gid and book and chosen_spread is not None):continue
         if pd.isna(qt) or pd.isna(kick) or pd.isna(at) or not qt<=at<kick:continue
+        if reference_quote:
+            original=pd.to_datetime(live['V55_Original_Quote_Timestamp'],utc=True,errors='coerce')
+            timing=(live['V55_Live_Computed_On_Current_Quote'].eq(True)
+                    &live['V55_Quote_Game_ID'].astype(str).eq(gid)
+                    &original.le(qt)&(qt-original).le(pd.Timedelta(minutes=15))
+                    &live['_obs'].ge(qt)&live['_obs'].le(at))
+        else:
+            timing=((live['_obs'].le(qt)&(qt-live['_obs']).le(pd.Timedelta(minutes=90)))
+                    |_v55_live_quote_time_eligible(live,qt,at,max_quote_age=max_quote_age))
         hits=live.loc[(live['_home']==home)&(live['_away']==away)
           &(live['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
-          &live['_book'].eq(book)&live['_obs'].lt(kick)
-          &((live['_obs'].le(qt)&(qt-live['_obs']).le(pd.Timedelta(minutes=90)))
-            |_v55_live_quote_time_eligible(live,qt,at))]
+          &live['_book'].eq(book)&live['_obs'].lt(kick)&timing]
         if hits.empty:continue
         report['matched_games']+=1
         for rule in rules.values():
             field=rule['signal']
             if field not in hits.columns:continue
             research_only=rule.get('historical_screen_only') is True
+            if reference_quote and not research_only:
+                continue
             if research_only:
-                if _price(r.get('V55_Is_Regular_Season'))!=1 or 'V55_Is_Regular_Season' not in hits:continue
-                src=hits.loc[pd.to_numeric(hits['V55_Is_Regular_Season'],errors='coerce').eq(1)]
+                if reference_quote and rule['family']=='PATHI':
+                    src=hits
+                else:
+                    if _price(r.get('V55_Is_Regular_Season'))!=1 or 'V55_Is_Regular_Season' not in hits:continue
+                    src=hits.loc[pd.to_numeric(hits['V55_Is_Regular_Season'],errors='coerce').eq(1)]
             else:
                 src=hits.loc[hits['_obs'].ge(rule['qualified_at'])]
             if src.empty:continue
@@ -2595,15 +2631,19 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
                     None if research_only else rule['qualified_at'].isoformat(),
                     'HISTORICAL_RESEARCH_ONLY' if research_only else 'QUALIFIED_OOS',
                     'NOT_CERTIFIED' if research_only else 'PASS',True,source_status,book,
-                    float(hit['_spread']),rule['report_sha256'])))
+                    float(hit['_spread']),rule.get('report_sha256') or registry.get('report_sha256'))))
                 if direct:record['Observed_Quote_UTC']=str(hit.get('V55_Original_Quote_Timestamp'))
+                if 'V55_Recorded_Opening_Spread' in hit:
+                    record['V55_Recorded_Opening_Spread']=hit['V55_Recorded_Opening_Spread']
                 if key not in dedup or hit['_obs']>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=record
     emit=list(dedup.values())
     report['qualified_events']=len(emit)
     for x in emit:
         fam=x['Source_Family'];report['qualified_by_brain'][fam]=report['qualified_by_brain'].get(fam,0)+1
     report['status']='PASS' if emit else 'NO_MATCHING_QUALIFIED_PREGAME_RULE_FIRINGS'
-    return pd.DataFrame(emit).reindex(columns=list(columns)+['Observed_Quote_UTC'] if any('Observed_Quote_UTC' in r for r in emit) else list(columns)),report
+    extras=[name for name in ('Observed_Quote_UTC','V55_Recorded_Opening_Spread')
+            if any(name in record for record in emit)]
+    return pd.DataFrame(emit).reindex(columns=list(columns)+extras),report
 
 
 def read_v55_qualified_evidence(bq_client):

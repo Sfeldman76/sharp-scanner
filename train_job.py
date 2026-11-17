@@ -509,14 +509,15 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
     if proof is not None:
         result['stages']['frozen_rule_evidence_reconciliation'].update(proof)
     # Run the EXISTING verified producer before capture retrieval. This is
-    # prospective capture mode, not a Heavy Research job: only attested frozen
-    # recipes may fire, and only actual new signals write immutable GCS records.
+    # prospective capture mode. Actual live and research-only expert firings
+    # write immutable records and are reconciled by the authority evaluator.
     # The operator can restore read-only behavior with
     # NCAAF_V55_LIVE_AUDIT_PRODUCER_ENABLED=0.
     if capture_producer and board is not None and quote_frame is not None:
         producer=stage('prospective_live_brain_producer', lambda:
             backend.run_v55_prospective_producer_pass(board,quote_frame,inputs,
-                storage_client=gcs,bucket=bucket,now=datetime.now(timezone.utc)))
+                storage_client=gcs,bucket=bucket,now=datetime.now(timezone.utc),
+                bq_client=bq,horizon_days=horizon_days))
         if producer is not None:
             produced,producer_audit=producer
             result['stages']['prospective_live_brain_producer'].update(producer_audit)
@@ -566,7 +567,8 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
             if extra is not None:current.extend(extra)
         raw_normalized=[{**q,'quote_capture_ref':r.get('quote_capture_ref')} for r in current
                         if (q:=backend.quote_normal(
-            r,scoring_time,age_limit=None if backend.market(r.get('market'))=='spreads' else 180))]
+            r,scoring_time,age_limit=None if backend.market(r.get('market'))=='spreads'
+            else backend.V55_EXECUTION_QUOTE_MAX_AGE_MINUTES))]
         qrows=[{**q,'kickoff_utc':q['kickoff'].isoformat(),
                 'quote_observed_at_utc':q['quote'].isoformat()} for q in raw_normalized]
         pair_ok,pair_holds=backend.v55_validate_shadow_quote_pairs(qrows)

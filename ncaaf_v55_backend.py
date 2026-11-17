@@ -18,6 +18,8 @@ from pathlib import Path
 SCHEMA='NCAAF-V55-TWO-ENGINE-ROI-REGISTRY-V1'
 POLICY='V55-UNIFIED-SEVEN-BRAIN-VALIDATED-BETTING-EDGE-20261106-R1'
 POLICY_STATUS='OOS_VALIDATED_BETTING_EDGE_AUTHORITY'
+V55_EXECUTION_QUOTE_MAX_AGE_MINUTES=24*60
+V55_EXECUTION_QUOTE_MAX_AGE=timedelta(minutes=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES)
 BRAINS=frozenset(('CORE','STAT','SYSTEM_MINER','PATHI','BIG_AL','PREDICTION_TRACKER','MARKET_RICH'))
 
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False,default=str).encode()).hexdigest()
@@ -125,37 +127,45 @@ def row_quotes(board):
         book=s(r.get('Backend_Quote_Book') or r.get('book')).lower()
         state=s(r.get('Quote_State'))
         if not gid or not book or not state.startswith('FRESH_'):continue
+        # Board rows use the newer pair timestamp as the join key. Freshness
+        # must also cover the older sportsbook side when both stamps exist.
+        clock_q=clock(q)
+        side_stamps=[clock(r.get('Backend_'+label+'_Quote_UTC')) for label in ('Home','Away')]
+        age_basis=min([t for t in [clock_q,*side_stamps] if t],default=None)
         for side,prefix in (('HOME','Home'),('AWAY','Away')):
             line=num(r.get('Backend_'+prefix+'_Spread'))
             odds=num(r.get('Backend_'+prefix+'_Odds_American'))
             if line is None or odds is None:continue
             out.append(dict(game_id=gid,kickoff_utc=kick,market='spreads',side=side,
                             book=book,line=line,odds=odds,quote_observed_at_utc=q,
+                            oldest_pair_quote_observed_at_utc=age_basis.isoformat() if age_basis else None,
                             home_team=r.get('Home_Team') or r.get('Home_Team_Norm'),
                             away_team=r.get('Away_Team') or r.get('Away_Team_Norm'),
                             paired_source_verified=True,backend_published_quote_verified=True))
     return out
 
-def quote_normal(raw,at,age_limit=15):
+def quote_normal(raw,at,age_limit=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES):
     gid=s(raw.get('game_id') or raw.get('Game_ID'))
     m=market(raw.get('market') or raw.get('Market'))
     side=s(raw.get('side') or raw.get('Side')).upper()
     kick=clock(raw.get('kickoff_utc') or raw.get('Game_Start_UTC'))
     quoted=clock(raw.get('quote_observed_at_utc') or raw.get('Snapshot_Timestamp'))
+    age_basis=clock(raw.get('oldest_pair_quote_observed_at_utc')) or quoted
     book=s(raw.get('book') or raw.get('Bookmaker')).lower()
     line=num(raw.get('line') if 'line' in raw else raw.get('Value'))
     odds=num(raw.get('odds') if 'odds' in raw else raw.get('Odds_Price'))
     if (not gid or m not in ('spreads','h2h','totals') or not book or
         side not in (('OVER','UNDER') if m=='totals' else ('HOME','AWAY')) or
-        not kick or not quoted or not quoted<=at<kick or quoted>=kick or
-        (age_limit is not None and (at-quoted).total_seconds()>age_limit*60) or
+        not kick or not quoted or not age_basis or not age_basis<=quoted<=at<kick or
+        (age_limit is not None and (at-age_basis).total_seconds()>age_limit*60) or
         profit(odds) is None or
         (m!='h2h' and (line is None or round(line*2)!=line*2)) or
         not truth(raw.get('paired_source_verified')) or
         not (truth(raw.get('backend_published_quote_verified')) or s(raw.get('quote_capture_ref')))):
         return None
     return dict(game_id=gid,market=m,side=side,book=book,line=(line if m!='h2h' else None),
-                odds=odds,quote=quoted,kickoff=kick)
+                odds=odds,quote=quoted,kickoff=kick,
+                oldest_pair_quote_observed_at_utc=age_basis.isoformat())
 
 def _v55_signal_quote_sequence(event, observed, quoted, book_quote, at):
     """Two legitimate prospective sequences; NEVER backdate model decisions.
@@ -163,7 +173,7 @@ def _v55_signal_quote_sequence(event, observed, quoted, book_quote, at):
     Original signals may precede the recorded sportsbook snapshot. A frozen
     rule evaluated *on* an already recorded current quote naturally fires
     after that snapshot. The latter must have its own immutable first-seen
-    capture and an exact quote-source reference, all within 15 minutes.
+    capture and an exact quote-source reference within the execution-age window.
     """
     qclock=book_quote['quote']
     kickoff=book_quote['kickoff']
@@ -174,7 +184,7 @@ def _v55_signal_quote_sequence(event, observed, quoted, book_quote, at):
     return (truth(event.get('prospective_evaluation_after_quote'))
         and bool(s(event.get('signal_capture_ref')))
         and bool(s(event.get('quote_capture_ref')))
-        and quoted<=observed and (observed-quoted).total_seconds()<=900)
+        and quoted<=observed and observed-quoted<=V55_EXECUTION_QUOTE_MAX_AGE)
 
 
 def signals_by_side(events,boards,quotes,at):
@@ -324,7 +334,12 @@ def v55_apply_combined_model_authority(board_rows, shadow, attestation, *,
         ev=num(combined.get('shadow_ev_per_unit'))
         prob=num(combined.get('shadow_probability'))
         if ev is None or prob is None or not 0<prob<1 or ev<float(proof['min_live_ev']):continue
-        if item.get('shadow_price_status')!='REFERENCE_QUOTE_WITHIN_15_MIN__NO_AUTHORITY':continue
+        quoted=clock(item.get('quote_observed_at_utc'))
+        oldest=clock(item.get('oldest_pair_quote_observed_at_utc'))
+        kickoff=clock(item.get('kickoff_utc'))
+        if not (oldest and quoted and kickoff and oldest<=quoted<=at<kickoff
+                and at-oldest<=V55_EXECUTION_QUOTE_MAX_AGE):
+            continue
         gid=s(item.get('game_id'));side=s(item.get('side')).upper()
         if side not in (('OVER','UNDER') if proof['market']=='totals' else ('HOME','AWAY')):continue
         by_game[(gid,proof['market'])].append((item,ev,prob))
@@ -351,6 +366,8 @@ def v55_apply_combined_model_authority(board_rows, shadow, attestation, *,
            'V55_Validated_Edge_Lower_ROI':float(proof['oos_roi_lower_adjusted']),
            'V55_Validated_Edge_Certificate_ID':str(proof['model_sha256'])[:24],
            'Backend_Quote_Book':item['book'],'Odds_American':item['quoted_odds'],
+           'Backend_Quote_Timestamp':item['quote_observed_at_utc'],
+           'V55_Authority_Quote_Age_Basis_UTC':item['oldest_pair_quote_observed_at_utc'],
            'Current_Spread':item['quoted_line'],
            'V55_Bet_Key':sha((gid,proof['market'],item['side']))[:28],
            'V55_Unified_Research_State':'COMBINED_ML_VALIDATED',
@@ -399,6 +416,9 @@ def evaluate(board,signals,registry,*,now=None,extra_quotes=None,max_bets=3,allo
             rejected_quotes+=1;continue
         if m=='totals' and abs(x['line']-y['line'])>1e-8:
             rejected_quotes+=1;continue
+        oldest=min(x['oldest_pair_quote_observed_at_utc'],y['oldest_pair_quote_observed_at_utc'])
+        for q in (x,y):
+            q['oldest_pair_quote_observed_at_utc']=oldest
         pairs.extend([x,y])
     unique={(q['game_id'],q['market'],q['side'],q['book'],q['line']):q for q in pairs}
     pairs=list(unique.values())
@@ -425,7 +445,9 @@ def evaluate(board,signals,registry,*,now=None,extra_quotes=None,max_bets=3,allo
                 'origins':sorted({r['origin'] for r in obs.values()}),
                 'system_ids':sorted(comps),'raw_signal_count':len(obs),
                 'price_book':q['book'],'price_spread':q['line'],'price_odds':q['odds'],
-                'quote_utc':q['quote'].isoformat(), 'qualified_independent_families':len(best[0]['components']) if best else 0,
+                'quote_utc':q['quote'].isoformat(),
+                'oldest_pair_quote_observed_at_utc':q['oldest_pair_quote_observed_at_utc'],
+                'qualified_independent_families':len(best[0]['components']) if best else 0,
                 'qualified_family_keys':list(best[0]['components']) if best else [],
                 'certificate_id':best[0]['id'] if best else None,
                 'validated_roi':best[1]['repriced_roi'] if best else None,
@@ -495,6 +517,7 @@ def evaluate(board,signals,registry,*,now=None,extra_quotes=None,max_bets=3,allo
         if chosen:
             r['Selected_Team']=chosen['team'];r['V55_Research_Selected_Side']=chosen['side']
             r['Backend_Quote_Book']=chosen['price_book'];r['Backend_Quote_Timestamp']=chosen['quote_utc']
+            r['V55_Authority_Quote_Age_Basis_UTC']=chosen['oldest_pair_quote_observed_at_utc']
             r['Current_Spread']=chosen['price_spread'];r['Odds_American']=chosen['price_odds']
             r['V55_Bet_Key']=sha((gid,chosen['market'],chosen['side']))[:28]
             r['V55_Qualified_Evidence_Detail_JSON']=json.dumps(chosen['qualified_family_keys'])
@@ -1072,7 +1095,7 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None, storag
                 if not gid or not sid or not capture or not evtime or not kickoff or not quote_time:
                     rejected['MISSING_ORIGINAL_EVENT_PROVENANCE']+=1;continue
                 producer_after_quote=(truth(e.get('prospective_evaluation_after_quote')) and
-                    quote_time<=evtime<kickoff and (evtime-quote_time).total_seconds()<=900 and
+                    quote_time<=evtime<kickoff and evtime-quote_time<=V55_EXECUTION_QUOTE_MAX_AGE and
                     bool(s(e.get('quote_capture_ref'))) and bool(s(e.get('signal_capture_ref'))))
                 if not ((evtime<=quote_time<kickoff) or producer_after_quote) or quote_time>at or evtime>at:
                     rejected['NOT_VERIFIED_PREGAME_CHRONOLOGY']+=1;continue
@@ -1123,6 +1146,9 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None, storag
 V55_PROSPECTIVE_PRODUCER_TAG='V55_FROZEN_EXPERT_ORIGIN_CAPTURE_20261110_V1'
 V55_HISTORICAL_EXPERT_PRODUCER_TAG='V55_EXACT_EXPERT_RESEARCH_CAPTURE'
 V55_BIG_AL_REVENGE_RULE='BigAl_CF2_LateSeasonRevengeDog'
+V55_PATHI_KEY_RULE='Pathi_FB_Crossed_Key_Toward_Team'
+V55_EXPERT_REFERENCE_RULES=frozenset((('BIG_AL',V55_BIG_AL_REVENGE_RULE),
+                                     ('PATHI',V55_PATHI_KEY_RULE)))
 
 
 def _v55_producer_definition_hash(rule, family_name, system_id, registry_sha):
@@ -1135,7 +1161,8 @@ def _v55_producer_definition_hash(rule, family_name, system_id, registry_sha):
     return sha(recipe)
 
 
-def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *, now=None):
+def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *, now=None,
+                                  reference_quote=False):
     """Adapt current frozen-rule firings to the existing 7-brain contract.
 
     Only actual pregame evaluation rows produced NOW are accepted. Match an
@@ -1155,6 +1182,13 @@ def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *,
         if fam not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER') or not rule:
             holds['FROZEN_RULE_ID_NOT_VERIFIED']+=1;continue
         research_only=rule.get('historical_screen_only') is True
+        reference=reference_quote and research_only and (fam,sid) in V55_EXPERT_REFERENCE_RULES
+        if reference_quote and not reference:
+            holds['RULE_NOT_ELIGIBLE_FOR_RESEARCH_REFERENCE']+=1;continue
+        pathi_key=fam=='PATHI' and (sid==V55_PATHI_KEY_RULE or rule['signal']==V55_PATHI_KEY_RULE)
+        opener=num(e.get('V55_Recorded_Opening_Spread'))
+        if pathi_key and opener is None:
+            holds['NO_RECORDED_PATHI_OPENING_SPREAD']+=1;continue
         registry_sha=s(rule.get('report_sha256')) if research_only else qualified_sha
         required_status=('HISTORICAL_RESEARCH_ONLY','NOT_CERTIFIED') if research_only else ('QUALIFIED_OOS','PASS')
         if (s(e.get('Qualification_Status')),s(e.get('OOS_Status')))!=required_status or not truth(e.get('Direction_Verified')):
@@ -1169,18 +1203,20 @@ def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *,
         source_quote=clock(e.get('Observed_Quote_UTC'))
         if not (observed and source_quote and
                 (research_only or rule['qualified_at']<=source_quote) and source_quote<=observed<=at and
-                (observed-source_quote).total_seconds()<=900):
+                (reference or observed-source_quote<=V55_EXECUTION_QUOTE_MAX_AGE)):
             holds['NO_CURRENT_ORIGINAL_QUOTE_PROVENANCE']+=1;continue
         gid=s(e.get('Game_ID'));direction=s(e.get('Signal_Side'))
         source_book=s(e.get('Observed_Book')).lower()
         options=[]
         for r in board_rows:
             if gid!=s(r.get('Game_ID') or r.get('game_id')):continue
-            if research_only and num(r.get('V55_Is_Regular_Season'))!=1:continue
+            if research_only and not (reference and fam=='PATHI') and num(r.get('V55_Is_Regular_Season'))!=1:
+                continue
             kick=clock(r.get('Game_Start_UTC'))
             quote=clock(r.get('Backend_Quote_Timestamp'))
-            if not (kick and quote and observed<kick and source_quote<=quote<=at and
-                    (at-quote).total_seconds()<=900 and
+            if not (kick and quote and source_quote<=quote<=observed<kick and
+                    0<=(quote-source_quote).total_seconds()<=900 and
+                    (reference or at-quote<=V55_EXECUTION_QUOTE_MAX_AGE) and
                     source_book==s(r.get('Backend_Quote_Book')).lower() and
                     s(r.get('Quote_State')).startswith('FRESH_')):continue
             matchup=s(r.get('Matchup'))
@@ -1244,6 +1280,10 @@ def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *,
             'qualification_level':'HISTORICAL_SCREEN_ONLY' if research_only else 'QUALIFIED_OOS',
             'original_event_created_prospectively':True,
             'historical_betting_roi_certified':False})
+        if reference:
+            out[-1].update(bet_authority=0,research_reference_quote=True)
+        if pathi_key:
+            out[-1]['trigger_opening_spread']=opener
     return out,{'status':'PROSPECTIVE_RULE_FIRINGS_PREPARED' if out else 'NO_VERIFIED_PROSPECTIVE_RULE_FIRINGS',
                 'prepared':len(out),'by_brain':dict(Counter(e['source_family'] for e in out)),
                 'holds':dict(holds),'legacy_miner_used':False,
@@ -1555,7 +1595,7 @@ def produce_v55_full_history_miner(board, feature_rows, qualified_registry, *,
         kickoff=clock(row.get('Game_Start_UTC'))
         book=s(row.get('Backend_Quote_Book')).lower()
         if not (quote and kickoff and quote<=at<kickoff and
-                (at-quote).total_seconds()<=900 and book and
+                at-quote<=V55_EXECUTION_QUOTE_MAX_AGE and book and
                 s(row.get('Quote_State')).startswith('FRESH_')):
             holds['NO_CURRENT_BOOK_PRICE']+=1;continue
         prefix='Home' if side=='HOME' else 'Away'
@@ -2156,109 +2196,160 @@ def discover_v55_qualified_registry(storage_client, bucket, *, now=None):
     return verified,audit
 
 
+def _v55_expert_pathi_key_rows(source, board, utils, *, bq_client, at, horizon_days):
+    """Compute the directional flag from the original same-book spread and opener."""
+    import pandas as pd
+    from ncaaf_v55_board import _norm_team
+
+    if bq_client is None:
+        return source.iloc[:0],{'status':'NO_RECORDED_OPENER_CLIENT'}
+    fixtures={s(r['Game_ID']):r for r in board.to_dict('records')}
+    home_quotes=[]
+    for row in source.to_dict('records'):
+        if _norm_team(row['Outcome'])!=_norm_team(row['Home_Team_Norm']):
+            continue
+        home_quotes.append({'game_id':s(row['V55_Quote_Game_ID']),'market':'spreads',
+            'side':'HOME','book':row['V55_Quote_Book'],
+            'line':num(row['Value']),'odds':num(row['Odds_Price']),
+            'quote_observed_at_utc':row['Snapshot_Timestamp'],'kickoff_utc':row['Game_Start']})
+    openers,audit=v55_observed_openers(bq_client,list(fixtures.values()),home_quotes,
+                                        now=at,horizon_days=horizon_days)
+    home_open={key[0]:value for key,value in openers.items()}
+    ready=source.loc[source['V55_Quote_Game_ID'].map(s).isin(home_open)].copy()
+    if ready.empty:
+        return ready,audit
+    opening=ready['V55_Quote_Game_ID'].map(s).map(home_open)
+    home=ready['Outcome'].map(_norm_team).eq(ready['Home_Team_Norm'].map(_norm_team))
+    ready['V55_Recorded_Opening_Spread']=opening.where(home,-opening)
+    ready['First_Line_Value']=ready['V55_Recorded_Opening_Spread']
+    ready['Opening_Spread']=ready['V55_Recorded_Opening_Spread']
+    ready=utils.add_pathi_football_key_features(ready)
+    if not isinstance(ready,pd.DataFrame) or not {
+            V55_PATHI_KEY_RULE,'Pathi_FB_Key_DataReady','V55_Recorded_Opening_Spread'}.issubset(ready):
+        raise RuntimeError('PATHI_DIRECTIONAL_KEY_FIELDS_MISSING')
+    audit['games_with_recorded_opener']=len(home_open)
+    return ready,audit
+
+
 def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
-                                         bucket, now=None, log_func=None):
-    """Current genuine frozen-rule producer. Never executes old Miner/V1 authority."""
+                                         bucket, now=None, log_func=None,
+                                         bq_client=None, horizon_days=14):
+    """Capture attested live firings and exact research-only expert observations."""
     from ncaaf_v55_board import (_v55_direct_current_quote_rows,
         derive_v55_other_qualified_events)
     import pandas as pd
     at=clock(now) if now is not None else datetime.now(timezone.utc)
-    log=log_func or (lambda *_:None)
     audit={'status':'NOT_STARTED','producer':V55_PROSPECTIVE_PRODUCER_TAG,
         'families_eligible_for_production':['STAT','PATHI','BIG_AL','PREDICTION_TRACKER'],
         'full_history_miner_status':'REQUIRES_V5_FROZEN_RULE_LIVE_FIRING_PRODUCER_NOT_LEGACY_V2',
         'core_status':'ML_RESEARCH_SHADOW_NOT_AUTOMATIC_ORIGINAL_SELECTION',
         'market_rich_status':'DESCRIPTIVE_MARKET_FEATURES_NOT_AUTOMATIC_DIRECTIONAL_RULES',
         'source_capture_before_authority':True,'bet_authority':0}
-    # Read the CURRENT V5.5 qualification output, not the October 27
-    # ncaaf-research-v2.33.0 placeholder. A HOLD is a legitimate research
-    # outcome and may not be relabeled as FROZEN_OOS_QUALIFIED.
-    frozen,lookup_audit=discover_v55_qualified_registry(storage_client,bucket,now=at)
-    audit['qualification_lookup']=lookup_audit
-    audit['qualification_registry_uri']=lookup_audit.get('selected_uri') or lookup_audit.get('configured_uri')
-    audit['qualification_systems']=lookup_audit.get('qualified_rule_count',0)
-    audit['historical_shadow_executable_rules']=lookup_audit.get('executable_shadow_rule_count',0)
-    audit['historical_research_not_live_approved']=bool(
-        (frozen or {}).get('historical_screen_only') or not frozen)
-
-    expert_rules={k:v for k,v in (frozen or {}).get('rules',{}).items() if k[0]!='SYSTEM_MINER'}
-    audit['qualified_expert_rule_count']=len(expert_rules)
-    # This existing exact play-on-side rule has a historical canonical ID and
-    # a named live flag/readiness feature. Capture its actual current firings
-    # for grading even when the certificate registry has no executable rules.
-    revenge=('BIG_AL',V55_BIG_AL_REVENGE_RULE)
-    if revenge not in expert_rules:
-        recipe={'family':'BIG_AL','id':V55_BIG_AL_REVENGE_RULE,'signal':V55_BIG_AL_REVENGE_RULE,
-                'signal_type':'FLAG','direction':'PLAY_ON','key':'BIG_AL|COLLEGE_FOOTBALL',
-                'ready_field':V55_BIG_AL_REVENGE_RULE+'_DataReady','historical_screen_only':True}
-        expert_rules[revenge]=dict(recipe,report_sha256=sha(recipe))
-    frozen=dict(frozen or {},rules=expert_rules)
-    audit['historical_grading_rule_ids']=[rule['id'] for rule in expert_rules.values()
-                                          if rule.get('historical_screen_only')]
-    # Every live evaluation uses current executable paired quotes only; long
-    # research-reference quotes cannot be used to declare original predictions.
-    fresh=board.loc[board['Backend_Quote_Timestamp'].map(lambda x:
-        bool((t:=clock(x)) and 0<=(at-t).total_seconds()<=900))].copy()
-    if fresh.empty:
-        audit['status']='NO_EXECUTION_FRESH_PAIRED_QUOTES';return [],audit
-    regular_games=sum(num(v)==1 for v in fresh.get('V55_Is_Regular_Season',[]))
-    audit['fresh_verified_regular_season_games']=regular_games
-    if not regular_games and not audit['qualified_expert_rule_count']:
-        audit['status']='NO_FRESH_FIXTURES_WITH_VERIFIED_REGULAR_SEASON'
-        return [],audit
-    live_rows,qa=_v55_direct_current_quote_rows(fresh,book_quotes,now=at)
+    frozen,lookup=discover_v55_qualified_registry(storage_client,bucket,now=at)
+    frozen=frozen or {}
+    live_rules={k:v for k,v in frozen.get('rules',{}).items() if k[0]!='SYSTEM_MINER'}
+    audit.update(qualification_lookup=lookup,
+        qualification_registry_uri=lookup.get('selected_uri') or lookup.get('configured_uri'),
+        qualification_systems=lookup.get('qualified_rule_count',0),
+        historical_shadow_executable_rules=lookup.get('executable_shadow_rule_count',0),
+        historical_research_not_live_approved=bool(frozen.get('historical_screen_only') or not frozen),
+        qualified_expert_rule_count=len(live_rules))
+    live_rows,qa=_v55_direct_current_quote_rows(board,book_quotes,now=at,exact_pair=True)
     audit['paired_quote_audit']=qa
     if live_rows.empty:
         audit['status']='NO_ORIGINAL_PAIRED_QUOTE_ROWS';return [],audit
+
+    source=live_rows.copy()
+    verified_phase=pd.to_numeric(source['V55_Is_Regular_Season'],errors='coerce')
+    if 'Is_Regular_Season' in source:
+        source['Is_Regular_Season']=verified_phase.fillna(
+            pd.to_numeric(source['Is_Regular_Season'],errors='coerce'))
+    else:
+        source['Is_Regular_Season']=verified_phase
     try:
         import utils
-        source=live_rows.copy()
-        verified_phase=pd.to_numeric(source['V55_Is_Regular_Season'],errors='coerce')
-        if 'Is_Regular_Season' not in source:
-            source['Is_Regular_Season']=verified_phase
-        else:
-            source['Is_Regular_Season']=verified_phase.fillna(
-                pd.to_numeric(source['Is_Regular_Season'],errors='coerce'))
-        enriched=utils.attach_pathi_bigal_backend_features(source,'NCAAF',days_back=None)
-        if not isinstance(enriched,pd.DataFrame) or len(enriched)!=len(live_rows):
-            raise RuntimeError('FROZEN_FEATURE_PRODUCER_CHANGED_QUOTE_ROWS')
-        # Evaluation occurs NOW, AFTER the original sportsbook quote. Do not
-        # backdate the newly computed Pathi/Big Al/STAT rule firing.
-        enriched=enriched.copy()
-        evaluated_at=datetime.now(timezone.utc)
-        enriched['V55_Original_Quote_Timestamp']=enriched['Snapshot_Timestamp']
-        # The time is recorded AFTER feature evaluation finished. Recording
-        # the start of a long enrichment job would falsely backdate signals.
-        enriched['Snapshot_Timestamp']=pd.Timestamp(evaluated_at)
-        enriched['V55_Live_Computed_On_Current_Quote']=True
-        if 'V55_Is_Regular_Season' not in enriched:
-            audit['historical_grade_source_hold']='VERIFIED_PHASE_NOT_RETURNED_BY_FEATURE_PRODUCER'
-    except Exception as exc:
-        audit.update(status='HOLD_EXPERT_FEATURE_PRODUCER_FAILED',error=type(exc).__name__+':'+str(exc)[:240])
+    except ImportError as exc:
+        audit.update(status='HOLD_EXPERT_FEATURE_PRODUCER_FAILED',error=str(exc)[:240])
         return [],audit
+    try:
+        enriched=utils.attach_pathi_bigal_backend_features(source.copy(),'NCAAF',days_back=None)
+        if (not isinstance(enriched,pd.DataFrame) or len(enriched)!=len(source)
+                or not {'V55_Quote_Game_ID','Snapshot_Timestamp'}.issubset(enriched)):
+            raise RuntimeError('FROZEN_FEATURE_PRODUCER_CHANGED_QUOTE_ROWS')
+    except Exception as exc:
+        enriched=source.iloc[:0]
+        audit['expert_feature_hold']=type(exc).__name__+':'+str(exc)[:240]
+    try:
+        pathi_rows,audit['pathi_recorded_openers']=_v55_expert_pathi_key_rows(
+            source,board,utils,bq_client=bq_client,at=at,horizon_days=horizon_days)
+    except Exception as exc:
+        pathi_rows=source.iloc[:0]
+        audit['pathi_recorded_openers']={'status':'HOLD_PATHI_OPENER_OR_FEATURE_SOURCE',
+                                        'error':type(exc).__name__+':'+str(exc)[:240]}
+
+    # Stamp the time after feature evaluation. The original quote stays intact.
+    evaluated_at=datetime.now(timezone.utc)
     both=[]
-    for row in fresh.to_dict('records'):
+    for row in board.to_dict('records'):
         match=s(row.get('Matchup'))
         if ' @ ' not in match:continue
         away,home=match.split(' @ ',1)
-        for side,prefix,name in [('HOME','Home',home),('AWAY','Away',away)]:
-            ln=num(row.get('Backend_'+prefix+'_Spread'))
-            if ln is None:continue
-            item=dict(row);item['Selected_Team']=name;item['Current_Spread']=ln
-            both.append(item)
+        for side,name in (('Home',home),('Away',away)):
+            line=num(row.get('Backend_'+side+'_Spread'))
+            if line is not None:
+                both.append(dict(row,Selected_Team=name,Current_Spread=line))
     if not both:
         audit['status']='NO_UNAMBIGUOUS_TWO_SIDED_GAME_MATCHUP';return [],audit
-    observed,qa=derive_v55_other_qualified_events(pd.DataFrame(both),enriched,frozen,now=evaluated_at)
-    audit['rule_firing_audit']=qa
-    prepared,validation=normalize_v55_producer_events(observed,board,frozen,now=evaluated_at)
-    audit['normalization_audit']=validation
+    sides=pd.DataFrame(both)
+    fresh=sides.loc[sides['Backend_Quote_Timestamp'].map(lambda x:
+        bool((t:=clock(x)) and timedelta(0)<=evaluated_at-t<=V55_EXECUTION_QUOTE_MAX_AGE))]
+    audit['fresh_verified_regular_season_games']=fresh.loc[
+        pd.to_numeric(fresh['V55_Is_Regular_Season'],errors='coerce').eq(1),'Game_ID'].nunique() if 'V55_Is_Regular_Season' in fresh else 0
+    audit['research_reference_games']=qa['games']
+    research_rules={}
+    for fam,sid in sorted(V55_EXPERT_REFERENCE_RULES):
+        recipe={'family':fam,'id':sid,'signal':sid,'signal_type':'FLAG','direction':'PLAY_ON',
+                'key':fam+'|COLLEGE_FOOTBALL','historical_screen_only':True,
+                'ready_field':('Pathi_FB_Key_DataReady' if fam=='PATHI' else sid+'_DataReady')}
+        research_rules[(fam,sid)]=dict(recipe,report_sha256=sha(recipe))
+    audit['historical_grading_rule_ids']=[rule['id'] for rule in research_rules.values()]
+    prepared=[]
+    scored_keys=set()
+    for label,reference,eligible,rules in (
+        ('execution',False,fresh,live_rules),('research',True,sides,research_rules)):
+        audit[label+'_rules']={}
+        key_rules={k:v for k,v in rules.items() if k[0]=='PATHI'
+                   and (k[1]==V55_PATHI_KEY_RULE or v['signal']==V55_PATHI_KEY_RULE)}
+        for name,rows,scoped_rules in (
+            ('expert',enriched,{k:v for k,v in rules.items() if k not in key_rules}),
+            ('pathi_key',pathi_rows,key_rules)):
+            if eligible.empty or rows.empty or not scoped_rules:
+                continue
+            rows=rows.copy()
+            rows['V55_Original_Quote_Timestamp']=rows['Snapshot_Timestamp']
+            rows['Snapshot_Timestamp']=pd.Timestamp(evaluated_at)
+            rows['V55_Live_Computed_On_Current_Quote']=True
+            registry=dict(frozen,rules=scoped_rules)
+            observed,derived=derive_v55_other_qualified_events(
+                eligible,rows,registry,now=evaluated_at,reference_quote=reference,
+                max_quote_age=V55_EXECUTION_QUOTE_MAX_AGE)
+            normalized,validation=normalize_v55_producer_events(
+                observed,board,registry,now=evaluated_at,reference_quote=reference)
+            audit[label+'_rules'][name]={'derivation':derived,'normalization':validation}
+            for event in normalized:
+                identity=tuple(event[k] for k in (
+                    'game_id','source_family','system_id','side','quote_observed_at_utc'))
+                if identity not in scored_keys:
+                    prepared.append(event)
+                    scored_keys.add(identity)
     if not prepared:
         audit['status']='NO_VERIFIED_CURRENT_FROZEN_RULE_FIRINGS';return [],audit
     try:
         captured,capture=persist_v55_prospective_events(prepared,storage_client,bucket,now=evaluated_at)
-        audit['capture_audit']=capture
         audit.update(status='PASS_PROSPECTIVE_CAPTURED',accepted_events=len(captured),
-                     by_brain=dict(Counter(e['source_family'] for e in captured)))
+                     by_brain=dict(Counter(e['source_family'] for e in captured)),
+                     research_reference_events=sum(e.get('research_reference_quote') is True for e in captured),
+                     capture_audit=capture)
         return captured,audit
     except Exception as exc:
         audit.update(status='HOLD_PROSPECTIVE_IMMUTABLE_CAPTURE_WRITE_FAILED',
@@ -2266,17 +2357,14 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
         return [],audit
 
 
-
-
-
 def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
-                                      storage_client, bucket, now=None, log_func=None):
+                                      storage_client, bucket, now=None, log_func=None,
+                                      bq_client=None, horizon_days=14):
     """Evaluate ONLY currently attested frozen live rules; persist genuine firings.
 
-    Called by the existing train-job integration audit. A missing/held registry
-    is an explicit hold, never permission to promote retrospective candidates.
-    Writes only immutable prospective event captures if a genuine rule fires.
-    The scoring/authority functions and ROI certificates are not modified.
+    Called by the existing train-job integration audit. Attested live rules
+    and exact expert research rules write immutable prospective captures.
+    Research captures cannot confer betting authority.
     """
     at=clock(now) if now is not None else datetime.now(timezone.utc)
     audit={'status':'HOLD_NO_PROSPECTIVE_EVENTS','bet_authority':0,
@@ -2286,7 +2374,7 @@ def run_v55_prospective_producer_pass(board, book_quotes, feature_rows, *,
     try:
         produced,expert_audit=produce_v55_verified_expert_signals(
             board,book_quotes,storage_client=storage_client,bucket=bucket,
-            now=at,log_func=log_func)
+            now=at,log_func=log_func,bq_client=bq_client,horizon_days=horizon_days)
         events.extend(produced)
         audit['expert_producer']=expert_audit
     except Exception as exc:
@@ -2372,14 +2460,19 @@ def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
             quote_ref=s(ev.get('quote_capture_ref'))
             ident=s(ev.get('capture_id'))
             reference_quote=(include_reference_quotes and
-                ev.get('producer')==V55_LIBRARY_MINER_PRODUCER and
                 ev.get('qualification_level')=='HISTORICAL_SCREEN_ONLY' and
-                ev.get('bet_authority')==0 and fam=='SYSTEM_MINER')
+                ev.get('bet_authority')==0 and (
+                    (ev.get('producer')==V55_LIBRARY_MINER_PRODUCER and fam=='SYSTEM_MINER')
+                    or (ev.get('producer')==V55_HISTORICAL_EXPERT_PRODUCER_TAG
+                        and ev.get('research_reference_quote') is True
+                        and (fam,s(ev.get('system_id'))) in V55_EXPERT_REFERENCE_RULES
+                        and (fam!='PATHI' or num(ev.get('trigger_opening_spread')) is not None))))
             if (fam not in BRAINS or not ident or capture!=uri+'#'+ident
                 or not quote_ref or not truth(ev.get('direction_verified'))
                 or not signal_time or not quote_time or not kickoff
                 or not quote_time<=signal_time<=at<kickoff
-                or (not reference_quote and (signal_time-quote_time).total_seconds()>900)
+                or (ev.get('research_reference_quote') is True and not reference_quote)
+                or (not reference_quote and signal_time-quote_time>V55_EXECUTION_QUOTE_MAX_AGE)
                 or (at-signal_time).total_seconds()>hours*3600
                 or not s(ev.get('game_id')) or not s(ev.get('system_id'))):
                 holds['INVALID_OR_EXPIRED_ORIGINAL_CAPTURE']+=1;continue
@@ -2393,7 +2486,7 @@ def read_recent_v55_prospective_captures(storage_client, bucket, *, now=None,
 
 
 def read_current_other_market_quotes(bq_client, board_rows, *, now=None,
-                                     horizon_days=14, minutes=180):
+                                     horizon_days=14, minutes=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES):
     """Read and pair real NCAAF H2H/totals from the existing scanner table.
 
     Require exact normalized home and away and a compatible market kickoff.
@@ -3034,7 +3127,7 @@ def evaluate_v55_grade_handoff(board, signals, registry, grades, *, extra_quotes
                 decision=cand['status']
         elif event_types.get((component,key))=={True}:
             decision='SHADOW_ONLY_ORIGINAL_CAPTURE'
-        elif not key[-1] or not 0<=(at-key[-1]).total_seconds()<=900:
+        elif not key[-1] or not timedelta(0)<=at-key[-1]<=V55_EXECUTION_QUOTE_MAX_AGE:
             decision='EXECUTION_QUOTE_OUTSIDE_FRESHNESS_WINDOW'
         else:
             decision='NO_EXACT_AUTHORITY_CANDIDATE'
@@ -3232,13 +3325,15 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     # Never attribute it to CORE. Allow the verified quote matcher to return
     # both sides with no selected-side shortcut.
     base['Selected_Team']=None
-    legacy=[c for c in base.columns if c.startswith(('V55_','V7_','Confirm_','Oppose_'))]
+    legacy=[c for c in base.columns if c.startswith(('V55_','V7_','Confirm_','Oppose_'))
+            and c!='V55_Is_Regular_Season']
     for c in legacy:base.drop(columns=[c],inplace=True)
     # Market source and current prices are always the scanner's BigQuery feed.
-    book_quotes=read_scanner_quotes(bq,minutes=180,horizon_days=14)
-    board,pricing=attach_verified_backend_quotes(base,book_quotes,max_age_minutes=180)
-    pricing["reference_quote_max_age_minutes"]=180
-    pricing["execution_quote_max_age_minutes"]=15
+    book_quotes=read_scanner_quotes(bq,minutes=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES,horizon_days=14)
+    board,pricing=attach_verified_backend_quotes(
+        base,book_quotes,max_age_minutes=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES)
+    pricing["reference_quote_max_age_minutes"]=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES
+    pricing["execution_quote_max_age_minutes"]=V55_EXECUTION_QUOTE_MAX_AGE_MINUTES
     pricing["reference_quote_never_grants_bet_authority"]=True
     # Source-specific signal timestamps and frozen hashes are mandatory.
     # Never infer a "directional signal" from CORE probabilities, names, or
@@ -3296,7 +3391,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     if s(os.getenv('NCAAF_V55_PRODUCER_BRIDGE_ENABLED','1')).lower() not in ('0','off','false','no'):
         try:
             newly_captured,producer_audit=produce_v55_verified_expert_signals(
-                board,book_quotes,storage_client=gcs,bucket=bucket,log_func=log)
+                board,book_quotes,storage_client=gcs,bucket=bucket,log_func=log,bq_client=bq)
             if newly_captured:
                 signals.extend(newly_captured)
                 if source_hold=='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED':
@@ -3411,7 +3506,8 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     quote_clock=datetime.now(timezone.utc)
     qrows=[]
     for raw in row_quotes(board_rows)+extra_quotes:
-        q=quote_normal(raw,quote_clock,age_limit=None if market(raw.get('market'))=='spreads' else 180)
+        q=quote_normal(raw,quote_clock,age_limit=None if market(raw.get('market'))=='spreads'
+                       else V55_EXECUTION_QUOTE_MAX_AGE_MINUTES)
         if q:
             qrows.append({**q,'kickoff_utc':q['kickoff'].isoformat(),
                           'quote_observed_at_utc':q['quote'].isoformat(),
@@ -3755,6 +3851,11 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
     # The input may contain one quote claiming paired_source_verified without
     # its other side. Accept only genuinely same-book paired line/odds rows.
     quotes,quote_holds=v55_validate_shadow_quote_pairs(quotes)
+    oldest_by_pair={}
+    for q in quotes:
+        key=(q['game_id'],q['market'],q['book'])
+        oldest=clock(q.get('oldest_pair_quote_observed_at_utc')) or clock(q['quote_observed_at_utc'])
+        oldest_by_pair[key]=min(oldest,oldest_by_pair.get(key,oldest))
     current_market_by_game=v55_live_market_rich_quote_features(quotes,now=now)
     signal_counts=defaultdict(set)
     directional_counts=Counter()
@@ -4005,7 +4106,10 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                        for k in directional_counts):expert_origins.append(fam)
             core_prob=(per.get('CORE') or {}).get('shadow_probability')
             expert_first=bool(expert_origins and (core_prob is None or core_prob<=fair_break_even))
+            oldest=oldest_by_pair[(q['game_id'],q['market'],q['book'])]
             records.append({'game_id':gid,'market':target,'side':q.get('side'), 'book':q.get('book'),
+                            'quote_observed_at_utc':quoted.isoformat(),'kickoff_utc':q['kickoff_utc'],
+                            'oldest_pair_quote_observed_at_utc':oldest.isoformat(),
                             'quoted_line':q.get('line'),'quoted_odds':q.get('odds'),
                             'quote_break_even_probability':round(fair_break_even,6) if fair_break_even is not None else None,
                             'expert_origin_families':sorted(expert_origins),
@@ -4013,9 +4117,9 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                             'expert_origin_is_descriptive_not_certified':True,
                             'price_comparison_contract':'EXACT_BOOK_SIDE_LINE_ODDS_AND_OBSERVATION',
                             'quote_age_minutes':round((now-quoted).total_seconds()/60.0,2),
-                            'shadow_price_status':('REFERENCE_QUOTE_NOT_EXECUTABLE__OVER_15_MIN'
-                                                   if (now-quoted).total_seconds()>900
-                                                   else 'REFERENCE_QUOTE_WITHIN_15_MIN__NO_AUTHORITY'),
+                            'shadow_price_status':('REFERENCE_QUOTE_NOT_EXECUTABLE__OVER_24_HOURS'
+                                                   if now-oldest>V55_EXECUTION_QUOTE_MAX_AGE
+                                                   else 'REFERENCE_QUOTE_WITHIN_24_HOURS__NO_AUTHORITY'),
                             'models':per,
                             'combined_model_sha256':(manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('sha256'),
                             'stacked_model_sha256':(manifest.get('artifacts') or {}).get('FULL_STACKED_margin',{}).get('sha256') if target=='spreads' else None,
