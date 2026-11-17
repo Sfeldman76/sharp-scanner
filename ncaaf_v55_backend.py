@@ -2010,6 +2010,94 @@ def _v55_published_miner_library(storage_client, bucket):
     return rules,counts,uri,digest,miner._extended_atoms
 
 
+def _v55_read_miner_score_history(bq_client, seasons, at):
+    """Read the latest CFBD score version visible at the live evaluation cutoff."""
+    from google.cloud import bigquery
+
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ScalarQueryParameter('as_of','TIMESTAMP',at),
+    ])
+    return bq_client.query('''
+        WITH visible AS (
+          SELECT season, game_id, home_team, away_team, home_points,
+                 away_points, api_completed, ingested_at
+          FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_finals_v1`
+          WHERE season IN UNNEST(@seasons) AND ingested_at <= @as_of
+          QUALIFY DENSE_RANK() OVER (
+            PARTITION BY season, game_id ORDER BY ingested_at DESC
+          ) = 1
+        ), kickoffs AS (
+          SELECT season, game_id,
+                 IF(COUNT(DISTINCT kickoff_at) = 1, MIN(kickoff_at), NULL) AS kickoff_at
+          FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_game_sides_v1`
+          WHERE season IN UNNEST(@seasons)
+          GROUP BY season, game_id
+        )
+        SELECT DISTINCT v.*, k.kickoff_at
+        FROM visible v LEFT JOIN kickoffs k USING (season, game_id)
+    ''',job_config=config).result()
+
+
+def _v55_miner_score_history(rows, at):
+    by_game=defaultdict(set)
+    for r in rows:
+        game_id=_v55_live_id(r['game_id'])
+        observed=clock(r['ingested_at'])
+        if game_id and observed and observed<=at:
+            by_game[(r['season'],game_id)].add((observed,clock(r['kickoff_at']),
+                _v55_cfbd_school_key(r['home_team']),_v55_cfbd_school_key(r['away_team']),
+                r['home_points'],r['away_points'],r['api_completed']))
+    teams=defaultdict(list)
+    held_teams=set()
+    counts=Counter()
+    for (season,game_id),versions in by_game.items():
+        latest=max(v[0] for v in versions)
+        visible=[v for v in versions if v[0]==latest]
+        if not any(v[-1] is True for v in visible):
+            continue
+        observed,kickoff,home,away,hp,ap,_=visible[0]
+        if (len(visible)!=1 or not kickoff or kickoff>=observed or not home or not away
+                or home==away or hp is None or ap is None or min(hp,ap)<0):
+            counts['unusable_completed_games']+=1
+            held_teams.update((season,team) for v in visible for team in v[2:4] if team)
+            continue
+        teams[season,home].append((kickoff,game_id,hp,ap))
+        teams[season,away].append((kickoff,game_id,ap,hp))
+        counts['usable_completed_games']+=1
+    return teams,held_teams,dict(counts)
+
+
+def _v55_miner_score_fields(fixture, game_id, teams, held_teams, at):
+    _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
+    season=num(fixture.get('Season'))
+    if not game_id or not kickoff or at>=kickoff or season is None or season!=int(season):
+        return {}
+    fields={}
+    for team,prefix in ((home,''),(away,'Opp_')):
+        key=(int(season),team)
+        if key in held_teams:
+            continue
+        history=sorted((r for r in teams.get(key,()) if r[1]!=game_id and r[0]<at),reverse=True)
+        if not history:
+            continue
+        margins=[pf-pa for _,_,pf,pa in history]
+        fields[prefix+'WinPct_Prior' if prefix else 'Team_WinPct_Prior']=(
+            sum(1 if margin>0 else .5 if margin==0 else 0 for margin in margins)/len(margins))
+        if not prefix:
+            fields['Team_Game_Number_Prior']=len(margins)
+        if len(history)>1 and history[0][0]==history[1][0]:
+            continue
+        _,_,pf,pa=history[0]
+        fields.update({prefix+'Pregame_Prev_SU_Margin':pf-pa,
+                       prefix+'Prev_Points_For':pf,prefix+'Prev_Points_Against':pa,
+                       prefix+'Pregame_Prev_Points_For':pf,prefix+'Pregame_Prev_Points_Against':pa})
+        if not prefix and len({r[0] for r in history})==len(history):
+            streak=next((i for i,m in enumerate(margins) if m<=0),len(margins))
+            fields['Current_Win_Streak_Prior']=streak
+    return fields
+
+
 def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
                                  bq_client=None, horizon_days=7, now=None):
     """Evaluate the published full-history library with its pinned atom provider."""
@@ -2045,6 +2133,29 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
            'by_market':{},'pair_holds':dict(holds),'bet_authority':0}
     prepared=[]
     openers={}
+    score_fields={}
+    audit['completed_game_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
+    if bq_client is not None and pairs:
+        relevant={gid:fixtures[gid] for gid,_ in pairs}
+        seasons={int(season) for r in relevant.values() if (season:=num(r.get('Season'))) is not None
+                 and season==int(season)}
+        if seasons:
+            try:
+                score_rows=_v55_read_miner_score_history(bq_client,seasons,at)
+                teams,held_teams,score_counts=_v55_miner_score_history(score_rows,at)
+                for gid,fixture in relevant.items():
+                    canonical_id=_v55_live_id(features.get(gid,{}).get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
+                    score_fields[gid]=_v55_miner_score_fields(fixture,canonical_id,teams,held_teams,at)
+                audit['completed_game_inputs']={
+                    'status':'PASS' if any(score_fields.values()) else 'NO_MATCHED_PRIOR_SCORES',
+                    'as_of_utc':at.isoformat(),'availability_basis':'FINAL_ROW_INGESTED_AT',
+                    'games_with_fields':sum(bool(fields) for fields in score_fields.values()),
+                    'games_by_field':dict(Counter(key for fields in score_fields.values() for key in fields)),
+                    'held_team_seasons':len(held_teams),**score_counts}
+            except Exception as exc:
+                score_fields={}
+                audit['completed_game_inputs']={'status':'HOLD_CFBD_SCORE_INPUTS',
+                    'error':type(exc).__name__+':'+str(exc)[:240],'games_with_fields':0}
     if bq_client is not None:
         try:
             openers,audit['opening_quotes']=v55_observed_openers(
@@ -2071,6 +2182,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             home_priors=(source.get('team_side_features') or {}).get('HOME',{})
             row={k:v for k,v in home_priors.items() if num(v) is not None} if (
                 source_time and source_time<=at<kickoff) else {}
+            row.update(score_fields.get(gid,{}))
             row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
                        Season=fixture.get('Season'),Week=fixture.get('Week'),
                        Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
