@@ -2098,6 +2098,144 @@ def _v55_miner_score_fields(fixture, game_id, teams, held_teams, at):
     return fields
 
 
+def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
+    """Build the frozen deep-context YPP fields from observed CFBD box scores."""
+    from google.cloud import bigquery
+    from statistics import mean
+    import re
+
+    schedules={key:sorted(games) for key,games in teams.items() if key not in held_teams}
+    participants=defaultdict(set)
+    for (season,team),games in schedules.items():
+        for kickoff,gid,_,_ in games:
+            participants[season,gid].add((team,kickoff))
+    cfg=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ScalarQueryParameter('as_of','TIMESTAMP',at),
+    ])
+    rows=bq_client.query("""
+        SELECT season, game_id, feed, payload_json, ingested_at
+        FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_feeds_v1`
+        WHERE season IN UNNEST(@seasons) AND ingested_at <= @as_of
+          AND status = 'PRESENT' AND payload_json IS NOT NULL
+          AND feed IN ('team_game','player_game','advanced_game')
+    """,job_config=cfg).result()
+    feeds=defaultdict(lambda:defaultdict(dict))
+    for row in rows:
+        key=(row['season'],_v55_live_id(row['game_id']))
+        sides=participants.get(key,())
+        observed=clock(row['ingested_at'])
+        if len(sides)!=2 or not observed or not all(kick<observed<=at for _,kick in sides):
+            continue
+        try:
+            payload=json.loads(row['payload_json'])
+        except (TypeError,ValueError):
+            continue
+        if isinstance(payload,list):
+            versions=feeds[key][row['feed']]
+            normalized=json.dumps(payload,sort_keys=True)
+            if observed not in versions:
+                versions[observed]=normalized
+            elif versions[observed]!=normalized:
+                versions[observed]=None
+
+    def side_rows(payload, gid, flat=False):
+        for item in payload:
+            if not isinstance(item,dict) or _v55_live_id(item.get('gameId',item.get('id')))!=gid:
+                continue
+            for side in ([item] if flat else item.get('teams') or []):
+                if isinstance(side,dict):
+                    yield _v55_cfbd_school_key(side.get('team')),side
+
+    def pairs_for(key, visible):
+        _,gid=key
+        boxes={}
+        for team,side in side_rows(visible.get('team_game',[]),gid):
+            if team in boxes:
+                return {}
+            boxes[team]={slug(stat.get('category')):stat.get('stat')
+                         for stat in side.get('stats') or [] if isinstance(stat,dict)}
+        if boxes.keys()!={team for team,_ in participants[key]}:
+            return {}
+        sacks=defaultdict(list)
+        for team,side in side_rows(visible.get('player_game',[]),gid):
+            for category in side.get('categories') or []:
+                if isinstance(category,dict) and slug(category.get('name'))=='defensive':
+                    for stat in category.get('types') or []:
+                        if isinstance(stat,dict) and slug(stat.get('name'))=='sacks':
+                            sacks[team].extend(v for a in stat.get('athletes') or []
+                                               if isinstance(a,dict) and (v:=num(a.get('stat'))) is not None)
+        advanced={team:num((side.get('offense') or {}).get('plays'))
+                  for team,side in side_rows(visible.get('advanced_game',[]),gid,flat=True)
+                  if isinstance(side.get('offense'),dict)}
+        ypp={}
+        for team,stats in boxes.items():
+            yards=num(stats.get('totalyards'))
+            if yards is None:
+                rush_yards=num(stats.get('rushingyards'))
+                pass_yards=num(stats.get('netpassingyards',stats.get('passingyards')))
+                if rush_yards is not None and pass_yards is not None:
+                    yards=rush_yards+pass_yards
+            rush=num(stats.get('rushingattempts'))
+            attempts=re.fullmatch(r'\s*\d+\s*[-/]\s*(\d+)\s*',s(stats.get('completionattempts')))
+            team_sacks=sum(sacks[team]) if sacks[team] else num(stats.get('sacks'))
+            if rush is not None and rush>=0 and attempts:
+                # Match the frozen CFBD warehouse loader's play-count precedence.
+                plays=rush+int(attempts[1])+(team_sacks or 0)
+            else:
+                plays=advanced.get(team) or num(stats.get('totalplays'))
+            if yards is not None and plays is not None and plays>0:
+                ypp[team]=yards/plays
+        return ypp
+
+    timeline={}
+    for key,sources in feeds.items():
+        visible={}
+        updates=sorted((timestamp,feed,payload) for feed,versions in sources.items()
+                       for timestamp,payload in versions.items())
+        history=[]
+        for i,(timestamp,feed,payload) in enumerate(updates):
+            visible[feed]=json.loads(payload) if payload is not None else []
+            if i+1==len(updates) or timestamp!=updates[i+1][0]:
+                history.append((timestamp,pairs_for(key,visible)))
+        timeline[key]=history
+
+    def game_ypp(season,gid,team,cutoff):
+        for stamp,values in reversed(timeline.get((season,gid),())):
+            if stamp<=cutoff:
+                other=next((opp for opp,_ in participants[season,gid] if opp!=team),None)
+                offense,defense=values.get(team),values.get(other)
+                net=offense-defense if offense is not None and defense is not None else None
+                return offense,defense,net
+        return None,None,None
+
+    context={}
+    for (season,team),games in schedules.items():
+        metrics=[game_ypp(season,gid,team,at) for _,gid,_,_ in games]
+        fields={}
+        for i,name in enumerate(('Off_YPP','Def_YPP_Allowed','Net_YPP')):
+            for period,window in (('Season',metrics),('Recent3',metrics[-3:])):
+                values=[row[i] for row in window if row[i] is not None]
+                if values:
+                    fields[f'CTX_{period}_{name}']=mean(values)
+        adjusted=[]
+        for (kick,gid,_,_),(_,_,net) in zip(games,metrics):
+            if net is None:
+                continue
+            opponent=next((opp for opp,_ in participants[season,gid] if opp!=team),None)
+            prior_net=[value for start,prior,_,_ in schedules.get((season,opponent),())
+                       if start<kick and (value:=game_ypp(season,prior,opponent,kick)[2]) is not None]
+            if prior_net:
+                adjusted.append(net+mean(prior_net))
+        if adjusted:
+            fields['CTX_OppAdj_NetYPP']=mean(adjusted)
+        if fields:
+            fields['Deep_Game_Count_Prior']=len(games)
+            context[season,team]=fields
+    return context,{'box_game_count':sum(len(h[-1][1])==2 for h in timeline.values()),
+                    'team_seasons_with_ypp':len(context)}
+
+
 def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
                                  bq_client=None, horizon_days=7, now=None):
     """Evaluate the published full-history library with its pinned atom provider."""
@@ -2134,7 +2272,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     prepared=[]
     openers={}
     score_fields={}
+    ypp_fields={}
     audit['completed_game_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
+    audit['ypp_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     if bq_client is not None and pairs:
         relevant={gid:fixtures[gid] for gid,_ in pairs}
         seasons={int(season) for r in relevant.values() if (season:=num(r.get('Season'))) is not None
@@ -2156,6 +2296,30 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 score_fields={}
                 audit['completed_game_inputs']={'status':'HOLD_CFBD_SCORE_INPUTS',
                     'error':type(exc).__name__+':'+str(exc)[:240],'games_with_fields':0}
+            else:
+                try:
+                    context,coverage=_v55_miner_ypp_context(bq_client,seasons,teams,held_teams,at)
+                    for gid,fixture in relevant.items():
+                        canonical_id=_v55_live_id(features.get(gid,{}).get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
+                        _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
+                        season=num(fixture.get('Season'))
+                        if not canonical_id or not kickoff or at>=kickoff or season not in seasons:
+                            continue
+                        if any(game[1]==canonical_id for team in (home,away) for game in teams.get((season,team),())):
+                            continue
+                        ypp_fields[gid]={f'{prefix}_{key}':value
+                                         for prefix,team in (('Team',home),('Opp',away))
+                                         for key,value in context.get((season,team),{}).items()}
+                    audit['ypp_inputs']={
+                        'status':'PASS' if any(ypp_fields.values()) else 'NO_MATCHED_CFBD_BOX_SCORES',
+                        'as_of_utc':at.isoformat(),'availability_basis':'BOX_SCORE_ROW_INGESTED_AT',
+                        'games_with_fields':sum(bool(fields) for fields in ypp_fields.values()),
+                        'games_by_field':dict(Counter(key for fields in ypp_fields.values() for key in fields)),
+                        **coverage}
+                except Exception as exc:
+                    ypp_fields={}
+                    audit['ypp_inputs']={'status':'HOLD_CFBD_BOX_SCORE_INPUTS',
+                        'error':type(exc).__name__+':'+str(exc)[:240],'games_with_fields':0}
     if bq_client is not None:
         try:
             openers,audit['opening_quotes']=v55_observed_openers(
@@ -2183,6 +2347,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             row={k:v for k,v in home_priors.items() if num(v) is not None} if (
                 source_time and source_time<=at<kickoff) else {}
             row.update(score_fields.get(gid,{}))
+            row.update(ypp_fields.get(gid,{}))
             row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
                        Season=fixture.get('Season'),Week=fixture.get('Week'),
                        Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
