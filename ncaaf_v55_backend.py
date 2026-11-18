@@ -11,7 +11,7 @@ Those upstream data services must feed canonical source records.
 from __future__ import annotations
 import argparse, csv, hashlib, io, json, math, os, sys, uuid
 from collections import Counter,defaultdict
-from datetime import datetime,timezone,timedelta
+from datetime import date,datetime,timezone,timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -2482,35 +2482,142 @@ def _v55_miner_expert_quote_fields(events,board_rows,at):
                    'mapped_expert_events_by_family':dict(counts),'mapped_spread_contexts':len(values)}
 
 
-def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key):
-    """Read the existing PT live-only forecast file with exact date and side identity."""
-    name='research/ncaaf/external/prediction_tracker/current_live.csv'
+def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,parse_csv=None):
+    """Join the existing live PT feeds on season, Eastern date and ordered schools."""
+    prefix='research/ncaaf/external/prediction_tracker/'
     stored=storage_client.bucket(bucket)
-    blob=stored.blob(name)
-    blob.reload()
-    observed=clock(blob.time_created)
-    if not observed or observed>at or not blob.generation:
-        raise ValueError('PT_LIVE_GENERATION_WITHOUT_PREGAME_OBSERVATION')
-    payload=stored.blob(name,generation=blob.generation).download_as_bytes()
-    grouped=defaultdict(list)
-    for row in csv.DictReader(io.StringIO(payload.decode('utf-8-sig'))):
-        home,away=(team_key(s(row.get(c))) for c in ('home_key','away_key'))
-        if home and away and home!=away:
-            grouped[(_v55_live_id(row.get('season')),s(row.get('game_date'))[:10],home,away)].append(row)
-    matches={}
+    matchups={}
     for fixture in board_rows:
-        gid=s(fixture.get('Game_ID'))
-        kickoff=clock(fixture.get('Game_Start_UTC'))
-        home,away=(team_key(s(fixture.get(c))) for c in ('Home_Team','Away_Team'))
-        if not gid or not kickoff or not observed<=at<kickoff or not home or not away:
+        gid,_,_,kickoff,_,_=_v55_board_fixture_identity(fixture)
+        home,away=(team_key(_v55_live_id(fixture.get(side+'_Team_Norm')) or _v55_live_id(fixture.get(side+'_Team')))
+                   for side in ('Home','Away'))
+        season=_v55_live_id(fixture.get('Season'))
+        if gid and season and kickoff and at<kickoff and home and away and home!=away:
+            day=kickoff.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+            matchups[gid]=(season,day,home,away)
+
+    matches={}
+    sources={}
+    for file in ('current_live.csv','current.csv','raw/ncaapredictions.csv'):
+        name=prefix+file
+        diag=sources[file]={'status':'NOT_READ'}
+        if file.startswith('raw/') and not callable(parse_csv):
+            diag['status']='PINNED_PT_PARSER_UNAVAILABLE'
             continue
-        day=kickoff.astimezone(ZoneInfo('America/New_York')).date().isoformat()
-        rows=grouped.get((_v55_live_id(fixture.get('Season')),day,home,away),())
-        if len(rows)==1:
-            matches[gid]=rows[0]
-    return matches,{'status':'READ','matched_games':len(matches),'source_generation':str(blob.generation),
-                    'observed_at_utc':observed.isoformat(),
-                    'source_ref':f'gs://{bucket}/{name}#{blob.generation}'}
+        try:
+            blob=stored.blob(name)
+            blob.reload()
+            observed=clock(blob.time_created)
+            if not observed or observed>at or not blob.generation:
+                diag['status']='NO_PREGAME_GENERATION'
+                continue
+            ref=f'gs://{bucket}/{name}#{blob.generation}'
+            diag.update(source_ref=ref,observed_at_utc=observed.isoformat())
+            payload=stored.blob(name,generation=blob.generation).download_as_bytes()
+            if file.startswith('raw/'):
+                records=[]
+                for season in sorted({key[0] for key in matchups.values()}):
+                    frame,parsed=parse_csv(payload,int(season),source_context='LIVE_GCS_FIRST')
+                    diag['raw_parser_status']=parsed.get('status')
+                    records.extend(frame.to_dict('records'))
+            else:
+                records=list(csv.DictReader(io.StringIO(payload.decode('utf-8-sig'))))
+        except Exception as exc:
+            diag.update(status='HOLD_PT_SOURCE',error=type(exc).__name__+':'+str(exc)[:240])
+            continue
+
+        grouped=defaultdict(list)
+        dates=Counter()
+        ordered_pairs=set()
+        undated=archive_rows=0
+        for row in records:
+            if file=='current.csv' and s(row.get('source_kind')).upper()!='LIVE_CURRENT':
+                archive_rows+=1
+                continue
+            season=_v55_live_id(row.get('season'))
+            home,away=(team_key(_v55_live_id(row.get(c))) for c in ('home_key','away_key'))
+            if not season or not home or not away or home==away:
+                continue
+            ordered_pairs.add((season,home,away))
+            day=s(row.get('game_date'))
+            try:
+                if len(day)!=10 or date.fromisoformat(day).isoformat()!=day:
+                    raise ValueError
+            except ValueError:
+                undated+=1
+                continue
+            dates[day]+=1
+            grouped[season,day,home,away].append(row)
+        diag.update(status='READ',rows=len(records),non_live_rows_skipped=archive_rows,
+                    undated_live_rows=undated,source_dates=dict(sorted(dates.items())[-16:]),
+                    matched_games=0,selected_games=0,ambiguous_games=0,
+                    ordered_pair_matches=sum((sy,h,a) in ordered_pairs for sy,_,h,a in matchups.values()),
+                    board_date_matches=sum(day in dates for _,day,_,_ in matchups.values()))
+        for gid,key in matchups.items():
+            rows=grouped.get(key,())
+            if len(rows)>1:
+                diag['ambiguous_games']+=1
+            if len(rows)!=1:
+                continue
+            diag['matched_games']+=1
+            # Keep each forecast row intact. Prefer newer visible generations,
+            # retaining the dedicated live feed on a timestamp tie.
+            if gid not in matches or observed>matches[gid][2]:
+                matches[gid]=(rows[0],ref,observed,file)
+    for _,_,_,file in matches.values():
+        sources[file]['selected_games']+=1
+    status='READ' if any(d['status']=='READ' for d in sources.values()) else 'HOLD_PT_LIVE_FORECAST_SOURCE'
+    return {gid:(row,ref) for gid,(row,ref,_,_) in matches.items()},{
+        'status':status,'matched_games':len(matches),'eligible_board_games':len(matchups),'sources':sources}
+
+
+def _v55_miner_schedule_classifications(bq_client,seasons,at):
+    """Read only identity and classification from pregame CFBD schedule payloads."""
+    from google.cloud import bigquery
+
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ScalarQueryParameter('cutoff','TIMESTAMP',at),
+    ])
+    return bq_client.query('''
+        SELECT Season AS season, JSON_VALUE(Payload_JSON,'$.id') AS game_id,
+               SAFE_CAST(JSON_VALUE(Payload_JSON,'$.startDate') AS TIMESTAMP) AS kickoff,
+               JSON_VALUE(Payload_JSON,'$.homeTeam') AS home,
+               JSON_VALUE(Payload_JSON,'$.awayTeam') AS away,
+               JSON_VALUE(Payload_JSON,'$.awayClassification') AS away_classification,
+               Retrieved_At AS observed
+        FROM `sharplogger.sharp_data.ncaaf_cfbd_api_archive`
+        WHERE Season IN UNNEST(@seasons) AND Endpoint = '/games' AND Retrieved_At <= @cutoff
+    ''',job_config=config).result()
+
+
+def _v55_miner_schedule_subdivisions(rows,fixtures,features,at):
+    by_match=defaultdict(set)
+    for row in rows:
+        game_id=_v55_live_id(row['game_id'])
+        kickoff,observed=clock(row['kickoff']),clock(row['observed'])
+        home,away=(_v55_cfbd_school_key(row[name]) for name in ('home','away'))
+        cls=s(row['away_classification']).upper()
+        if (game_id and home and away and home!=away and kickoff and observed
+                and observed<=at<kickoff and cls in ('FBS','FCS','II','II/III','III')):
+            by_match[row['season'],game_id,kickoff,home,away].add(cls)
+    found={}
+    for gid,fixture in fixtures.items():
+        _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
+        canonical_id=_v55_live_id(features.get(gid,{}).get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
+        choices=by_match.get((num(fixture.get('Season')),canonical_id,kickoff,home,away),())
+        if len(choices)==1:
+            found[gid]=next(iter(choices))
+    return found
+
+
+def _v55_miner_fill_conference_atoms(atoms,rule_atoms):
+    """The frozen evaluator emits only the categories present in a one-row frame."""
+    for prefix in ('CONF_','CONFPAIR_'):
+        if any(name.startswith(prefix) and value for name,value in atoms.items()):
+            for name in rule_atoms:
+                if name.startswith(prefix):
+                    atoms.setdefault(name,False)
 
 
 def _v55_miner_pt_fields(pt,opening,weights):
@@ -2593,7 +2700,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     if pairs and callable(pt_key:=atom_globals.get('_pt_team_key')):
         try:
             pt_rows,audit['miner_pt_live_inputs']=_v55_miner_current_pt_rows(
-                storage_client,bucket,board_rows,at,pt_key)
+                storage_client,bucket,board_rows,at,pt_key,atom_globals.get('_pt_parse_csv'))
         except Exception as exc:
             audit['miner_pt_live_inputs']={'status':'HOLD_PT_LIVE_FORECAST_SOURCE',
                                            'error':type(exc).__name__+':'+str(exc)[:240]}
@@ -2601,6 +2708,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     score_fields={}
     ypp_fields={}
     ypp_provenance={}
+    subdivisions={}
     teams={}
     prior_meetings={}
     rivalry_games=set()
@@ -2609,11 +2717,19 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit['completed_game_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['ypp_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['box_score_version_capture']={'status':'NOT_EVALUATED'}
+    audit['cfbd_schedule_classifications']={'status':'NOT_EVALUATED'}
     if bq_client is not None and pairs:
         relevant={gid:fixtures[gid] for gid,_ in pairs}
         seasons={int(season) for r in relevant.values() if (season:=num(r.get('Season'))) is not None
                  and season==int(season)}
         if seasons:
+            try:
+                rows=_v55_miner_schedule_classifications(bq_client,seasons,at)
+                subdivisions=_v55_miner_schedule_subdivisions(rows,relevant,features,at)
+                audit['cfbd_schedule_classifications']={'status':'READ','matched_games':len(subdivisions)}
+            except Exception as exc:
+                audit['cfbd_schedule_classifications']={'status':'HOLD_CFBD_SCHEDULE',
+                    'error':type(exc).__name__+':'+str(exc)[:240]}
             try:
                 audit['box_score_version_capture']=_v55_capture_miner_box_scores(bq_client,seasons)
             except Exception as exc:
@@ -2697,6 +2813,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             opening_spreads[gid].append((stamp,book,kick,opener))
     for mkt in counts:
         market_rules=[r for r in rules if r['market']==mkt]
+        market_atoms={name for rule in market_rules for name in rule['atoms']}
         stats={'rules':len(market_rules),'source_games':0,'fired':0,'not_met':0,
                'missing_inputs':0,'already_captured':0}
         rule_stats={r['rule_id']:Counter() for r in market_rules}
@@ -2724,6 +2841,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     val=s(home_priors.get(field))
                     if val and val.lower() not in ('nan','unknown','none','null','<na>'):
                         row[target]=val
+            if gid in subdivisions:
+                row.setdefault('Opponent_Subdivision',subdivisions[gid])
             row.update(score_fields.get(gid,{}))
             row.update(ypp_fields.get(gid,{}))
             canonical_id=_v55_live_id(source.get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
@@ -2761,14 +2880,16 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     row.update(dict.fromkeys(expert_refs,1))
                     supported_expert_games.add(gid)
                 if gid in pt_rows and (opening:=num(row.get('Opening_Spread'))) is not None:
-                    fields=_v55_miner_pt_fields(pt_rows[gid],opening,pt_weights)
+                    forecast,ref=pt_rows[gid]
+                    fields=_v55_miner_pt_fields(forecast,opening,pt_weights)
                     if fields:
                         row.update(fields)
                         pt_games.add(gid)
-                        pt_ref=audit['miner_pt_live_inputs']['source_ref']
+                        pt_ref=ref
             atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                 pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
                 market=mkt,enforce_support_floor=False)}
+            _v55_miner_fill_conference_atoms(atoms,market_atoms)
             # Verified positive firings give a lower bound, so an incomplete
             # family cannot establish a negative multi-signal observation.
             if atoms.get('EXPERT_PATHI_MULTI_2PLUS') is False and expert_refs:
@@ -2812,7 +2933,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 exact=(gid,mkt,target,q['book'],q['line'],q['odds'],q['quote_observed_at_utc'],
                        q['kickoff_utc'],rule['rule_id'])
                 cid=sha((V55_LIBRARY_MINER_PRODUCER,digest,exact))
-                stats['fired']+=1
+                rule_stats[rid]['fired']+=1
                 if cid in prior_ids:
                     stats['already_captured']+=1
                     continue
