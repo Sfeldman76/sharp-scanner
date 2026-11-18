@@ -54,6 +54,32 @@ V55_MINER_ADDITIONAL_PRIORS=frozenset((
     'CFBD_QB_Game_Pass_Success_SeasonPrior','CFBD_Opp_QB_Game_Pass_Success_SeasonPrior',
 ))
 V55_MINER_PREGAME_LABELS=frozenset(('CFBD_Conference','CFBD_Opp_Conference','Opponent_Subdivision'))
+# Live weather is not collected by the forward CFBD feature feed. Preserve the
+# frozen library unchanged, but do not hold live data completion or emit a
+# research firing that depends on an unavailable weather observation.
+V55_MINER_LIVE_EXCLUDED_PREFIXES=('CFBD_WEATHER_',)
+
+# Canonical team identity is a known game fact, not a historical outcome or a
+# betting signal. Exact aliases only: no substring/fuzzy team comparisons.
+V55_MINER_EXACT_TEAM_ATOMS={
+    'TEAM_ALABAMA_CRIMSON_TIDE':'alabama',
+    'TEAM_OHIO_STATE_BUCKEYES':'ohiostate',
+    'TEAM_CLEMSON_TIGERS':'clemson',
+    'TEAM_ARKANSAS_RAZORBACKS':'arkansas',
+}
+
+def _v55_miner_live_excluded_atom(name):
+    return any(str(name).startswith(prefix) for prefix in V55_MINER_LIVE_EXCLUDED_PREFIXES)
+
+def _v55_miner_verified_team_atoms(market_atoms, home):
+    """Match frozen HOME-team identity atoms against an exact canonical school."""
+    school=_v55_cfbd_school_key(home)
+    # Require a canonical key, not a token-prefix or invented alias.
+    if not school:
+        return {}
+    return {atom:(school==target) for atom,target in V55_MINER_EXACT_TEAM_ATOMS.items()
+            if atom in market_atoms}
+
 V55_MINER_OPENING_ROLE_ATOMS=frozenset(
     ('CURRENT_FAVORITE','CURRENT_DOG',*(f'{role}_{lo}_{hi}' for role in ('FAV','DOG')
       for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)))))
@@ -2096,6 +2122,79 @@ def _v55_miner_score_history(rows, at):
     return teams,held_teams,dict(counts)
 
 
+def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at):
+    """Historical *completed* games with recorded opening lines, not live quotes.
+
+    Prior season-context features are reconstructed from same-team, same-season
+    historical rows only. Dates must precede the upcoming fixture date strictly;
+    ties, conflicting identities/results and missing openers remain unavailable.
+    Historical records are not represented as original prospectively captured
+    model decisions, and cannot grant betting authority.
+    """
+    from google.cloud import bigquery
+    if not seasons or not fixtures:
+        return {}, {'status':'NO_FIXTURES'}
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ScalarQueryParameter('at','DATE',at.date()),
+    ])
+    sql="""SELECT Season, Game_Key, Game_Date, Is_Home, Team_Norm,
+                  Opponent_Norm, Opening_Spread, Team_Score, Opponent_Score
+           FROM `sharplogger.sharp_data.ncaaf_historical_game_side_context`
+           WHERE Season IN UNNEST(@seasons) AND Game_Date < @at
+             AND Game_Key IS NOT NULL AND Team_Score IS NOT NULL
+             AND Opponent_Score IS NOT NULL AND Opening_Spread IS NOT NULL"""
+    history=defaultdict(lambda:defaultdict(set))
+    for rec in bq_client.query(sql,job_config=config).result():
+        year=num(rec['Season'])
+        when=rec['Game_Date']
+        team=_v55_cfbd_school_key(rec['Team_Norm'])
+        other=_v55_cfbd_school_key(rec['Opponent_Norm'])
+        line=num(rec['Opening_Spread'])
+        scored=num(rec['Team_Score']);allowed=num(rec['Opponent_Score'])
+        if (year is None or when is None or not team or not other or team==other or
+                line is None or abs(line)>100 or scored is None or allowed is None or
+                scored<0 or allowed<0 or scored!=int(scored) or allowed!=int(allowed)):
+            continue
+        history[int(year),team][when].add((str(rec['Game_Key']),other,line,scored,allowed))
+    result={};status=Counter()
+    for gid,fixture in fixtures.items():
+        _,home,away,kick,_,_=_v55_board_fixture_identity(fixture)
+        year=num(fixture.get('Season'))
+        if not kick or not home or not away or year is None or year!=int(year):
+            continue
+        # Date-only historical rows cannot safely establish same-day chronology.
+        cutoff=kick.date()
+        candidates=[(d,next(iter(v))) for d,v in history.get((int(year),home),{}).items()
+                    if d<cutoff and len(v)==1]
+        candidates.sort(reverse=True,key=lambda x:x[0])
+        if not candidates:
+            status['no_unique_prior_priced_game']+=1
+            continue
+        latest_date,(_,last_opponent,last_line,points,conceded)=candidates[0]
+        state={'Prior_Market_Opening_Spread':last_line,
+               'Prior_Market_Game_Date':latest_date.isoformat(),
+               'Prior_Market_Opponent':last_opponent}
+        # This atom is strictly the last completed game's HOME-team opening
+        # favorite status. Do not extrapolate from current odds or final score.
+        state['_PRIOR_FAVORITE_ATOM']=last_line<0
+        if len(candidates)>=2:
+            second=candidates[1][1]
+            for item in (candidates[0][1],second):
+                if abs(item[2])>100:break
+            else:
+                margin1=points-conceded+last_line
+                margin2=second[3]-second[4]+second[2]
+                state['_ATS_WIN_STREAK_2_ATOM']=(margin1>0 and margin2>0)
+        result[gid]=state
+        status['games_with_prior_priced_game']+=1
+        status['games_with_two_prior_priced_games']+=int('_ATS_WIN_STREAK_2_ATOM' in state)
+    return result, {'status':'READ' if result else 'NO_VERIFIED_PRIOR_MARKET_ROWS',
+                    'source':'ncaaf_historical_game_side_context',
+                    'chronology':'STRICTLY_PRIOR_GAME_DATE_AND_RECORDED_OPEN',
+                    **dict(status)}
+
+
 def _v55_miner_score_fields(fixture, game_id, teams, held_teams, at):
     _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
     season=num(fixture.get('Season'))
@@ -2852,25 +2951,33 @@ def _v55_pt_dispersion_research(gcs,bq,bucket,sources,team_key,parse_csv):
 
 
 def _v55_miner_pt_fields(pt,opening,weights):
-    """Use the frozen home-margin convention against the recorded spread opener."""
+    """Preserve frozen PT component definitions, independent of opener availability.
+
+    Recorded opener is needed ONLY to translate a forecast home margin into
+    a relative-to-opening-line edge. Component dispersion and forecast count
+    are independent of any market quote, and may be populated by themselves.
+    """
     from statistics import pstdev
     import re
 
     out={}
-    for name,raw in pt.items():
-        if not name.startswith('ptidx__') or (value:=num(raw)) is None:
-            continue
-        code=re.sub(r'[^A-Z0-9]+','_',name.removeprefix('ptidx__').upper())
-        if code:
-            out[f'_V218_PTIDX_{code}_EDGE_POINTS']=value+opening
+    opener=num(opening)
+    if opener is not None:
+        for name,raw in pt.items():
+            if not name.startswith('ptidx__') or (value:=num(raw)) is None:
+                continue
+            code=re.sub(r'[^A-Z0-9]+','_',name.removeprefix('ptidx__').upper())
+            if code:
+                out[f'_V218_PTIDX_{code}_EDGE_POINTS']=value+opener
     components={name:value for name in weights if (value:=num(pt.get(name))) is not None}
-    for name,value in components.items():
-        out[f'_V212_PT_{name}_EDGE_POINTS']=value+opening
+    if opener is not None:
+        for name,value in components.items():
+            out[f'_V212_PT_{name}_EDGE_POINTS']=value+opener
     if len(components)==5:
         out['_V210_PT_META_SYSTEM_COUNT']=5
         out['_V212_PT_COMPONENT_STD']=pstdev(components.values())
-        if (meta:=num(pt.get('meta_margin_home'))) is not None:
-            out['_V210_PT_META_EDGE_POINTS']=meta+opening
+        if opener is not None and (meta:=num(pt.get('meta_margin_home'))) is not None:
+            out['_V210_PT_META_EDGE_POINTS']=meta+opener
     return out
 
 
@@ -2946,6 +3053,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             audit['miner_pt_live_inputs']={'status':'HOLD_PT_LIVE_FORECAST_SOURCE',
                                            'error':type(exc).__name__+':'+str(exc)[:240]}
     openers={}
+    prior_market_fields={}
     score_fields={}
     ypp_fields={}
     ypp_provenance={}
@@ -3027,6 +3135,16 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     ypp_provenance={}
                     audit['ypp_inputs']={'status':'HOLD_CFBD_BOX_SCORE_INPUTS',
                         'error':type(exc).__name__+':'+str(exc)[:240],'games_with_fields':0}
+    if bq_client is not None and pairs:
+        try:
+            relevant={gid:fixtures[gid] for gid,_ in pairs}
+            seasons={int(y) for f in relevant.values()
+                     if (y:=num(f.get('Season'))) is not None and y==int(y)}
+            prior_market_fields,audit['prior_market_history']=_v55_miner_prior_market_context(
+                bq_client,relevant,seasons,at)
+        except Exception as exc:
+            audit['prior_market_history']={'status':'HOLD_HISTORICAL_SOURCE',
+                'error':type(exc).__name__+':'+str(exc)[:240]}
     if bq_client is not None:
         try:
             openers,audit['opening_quotes']=v55_observed_openers(
@@ -3056,7 +3174,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         market_rules=[r for r in rules if r['market']==mkt]
         market_atoms={name for rule in market_rules for name in rule['atoms']}
         stats={'rules':len(market_rules),'source_games':0,'fired':0,'not_met':0,
-               'missing_inputs':0,'already_captured':0}
+               'missing_inputs':0,'already_captured':0,'inactive_weather':0}
         rule_stats={r['rule_id']:Counter() for r in market_rules}
         rule_missing={r['rule_id']:Counter() for r in market_rules}
         audit['by_market'][mkt]=stats
@@ -3086,6 +3204,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 row.setdefault('Opponent_Subdivision',subdivisions[gid])
             row.update(score_fields.get(gid,{}))
             row.update(ypp_fields.get(gid,{}))
+            prior_market=prior_market_fields.get(gid,{})
+            if prior_market:
+                row['Prev_Open_Spread']=prior_market['Prior_Market_Opening_Spread']
+                row['Prior_Opening_Spread']=prior_market['Prior_Market_Opening_Spread']
             canonical_id=_v55_live_id(source.get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
             rivalry=_v55_miner_rivalry_fields(prior_meetings,fixture,canonical_id,kickoff,at)
             if rivalry:
@@ -3121,8 +3243,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 if expert_refs:
                     row.update(dict.fromkeys(expert_refs,1))
                     supported_expert_games.add(gid)
-                if gid in pt_rows and (opening:=num(row.get('Opening_Spread'))) is not None:
-                    pt_verified_openers.add(gid)
+                if gid in pt_rows:
+                    opening=num(row.get('Opening_Spread'))
+                    if opening is not None:
+                        pt_verified_openers.add(gid)
                     forecast,ref,slate=pt_rows[gid]
                     pt_component_coverage.update(name for name in pt_weights if num(forecast.get(name)) is not None)
                     fields=_v55_miner_pt_fields(forecast,opening,pt_weights)
@@ -3142,6 +3266,18 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     value=atoms.get(name)
                     blocker_counts[name,'missing' if value is None else 'true' if value else 'false']+=1
             _v55_miner_fill_conference_atoms(atoms,market_atoms)
+            # Straightforward historical predicates only. More complex role
+            # flips/bounce-back systems retain MISSING until their exact
+            # frozen semantics and complete market history can be verified.
+            if 'PRIOR_FAVORITE' in market_atoms and '_PRIOR_FAVORITE_ATOM' in prior_market:
+                atoms.setdefault('PRIOR_FAVORITE',prior_market['_PRIOR_FAVORITE_ATOM'])
+            if 'ATS_WIN_STREAK_2' in market_atoms and '_ATS_WIN_STREAK_2_ATOM' in prior_market:
+                atoms.setdefault('ATS_WIN_STREAK_2',prior_market['_ATS_WIN_STREAK_2_ATOM'])
+            # Only those canonical team-ID predicates with an unambiguous
+            # exact school match can be evaluated without the legacy provider's
+            # full mascot/string convention. Never override the frozen provider.
+            for atom,value in _v55_miner_verified_team_atoms(market_atoms,fixture.get('Home_Team')).items():
+                atoms.setdefault(atom,value)
             # Verified positive firings give a lower bound, so an incomplete
             # family cannot establish a negative multi-signal observation.
             if atoms.get('EXPERT_PATHI_MULTI_2PLUS') is False and expert_refs:
@@ -3182,20 +3318,28 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'expert_context':bool(expert_refs),
                     'opponent_adjusted_ypp':gid in ypp_fields,
                     'prior_meeting':bool(rivalry),
+                    'verified_prior_market':bool(prior_market),
                 }}
             for atom_name in sorted(market_atoms):
-                state=('TRUE' if atoms[atom_name] else 'FALSE') if atom_name in atoms else 'MISSING'
+                state=('EXCLUDED_WEATHER' if _v55_miner_live_excluded_atom(atom_name) else
+                       ('TRUE' if atoms[atom_name] else 'FALSE') if atom_name in atoms else 'MISSING')
                 screen_record['atom_values'][atom_name]=state
                 screen_atom_coverage[mkt,atom_name][state]+=1
             screen_games[screen_key]=screen_record
             for rule in market_rules:
                 rid=rule['rule_id']
+                inactive_weather=any(_v55_miner_live_excluded_atom(a) for a in rule['atoms'])
                 unavailable=[name for name in rule['atoms'] if name not in atoms]
-                rule_state=('MISSING_ATOMS' if unavailable else
+                rule_state=('INACTIVE_WEATHER' if inactive_weather else
+                            'MISSING_ATOMS' if unavailable else
                             'FALSE_CONDITION' if not all(atoms[name] for name in rule['atoms']) else
                             'FIRED')
                 screen_record['system_status'][rid]=rule_state
                 screen_system_coverage[mkt,rid][rule_state]+=1
+                if inactive_weather:
+                    stats['inactive_weather']+=1
+                    rule_stats[rid]['inactive_weather']+=1
+                    continue
                 if unavailable:
                     stats['missing_inputs']+=1
                     rule_stats[rid]['missing_inputs']+=1
@@ -3252,6 +3396,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         matched_spread_games=sum(gid in pt_rows for gid,mkt in pairs if mkt=='spreads'),
         matched_spread_games_with_verified_openers=len(pt_verified_openers),
         games_with_pt_atom_fields=len(pt_games),
+        games_with_pt_dispersion_without_opener=len(pt_games-pt_verified_openers),
         frozen_five_component_coverage={name:pt_component_coverage[name] for name in pt_weights},
         frozen_five_complete_games=pt_full_five)
     audit['pt_spread_blocker_atoms']={
@@ -3285,11 +3430,11 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         names=sorted({a for r in rules if r['market']==mkt for a in r['atoms']})
         audit['by_market'][mkt]['atom_coverage']={
             name:{state:screen_atom_coverage[mkt,name][state]
-                  for state in ('TRUE','FALSE','MISSING')}
+                  for state in ('TRUE','FALSE','MISSING','EXCLUDED_WEATHER')}
             for name in names}
         audit['by_market'][mkt]['system_coverage']={
             r['rule_id']:{state:screen_system_coverage[mkt,r['rule_id']][state]
-                          for state in ('FIRED','FALSE_CONDITION','MISSING_ATOMS')}
+                          for state in ('FIRED','FALSE_CONDITION','MISSING_ATOMS','INACTIVE_WEATHER')}
             for r in rules if r['market']==mkt}
     audit['live_screen_inputs']={
         'schema':'NCAAF_V55_LIVE_SCREEN_ATOMS_V1',
@@ -3297,8 +3442,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         'game_markets':screen_games,
         'game_markets_evaluated':len(screen_games),
         'rules_in_frozen_library':len(rules),
-        'atom_status_contract':'TRUE_FALSE_MISSING__NO_SYNTHETIC_VALUES',
-        'system_status_contract':'FIRED_FALSE_CONDITION_MISSING_ATOMS',
+        'atom_status_contract':'TRUE_FALSE_MISSING_EXCLUDED_WEATHER__NO_SYNTHETIC_VALUES',
+        'system_status_contract':'FIRED_FALSE_CONDITION_MISSING_ATOMS_INACTIVE_WEATHER',
+        'live_weather_policy':'EXCLUDED_NO_FORWARD_WEATHER_SOURCE',
         'all_seven_brains_expected':sorted(BRAINS),
         'source_evidence':{
             'original_events_by_brain':audit.get('miner_signal_manifest',{}).get('by_family',{}),
@@ -3306,6 +3452,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             'prediction_tracker':audit.get('miner_pt_live_inputs',{}),
             'cfbd_matchups':audit.get('recovered_cfbd_matchup_games_by_field',{}),
             'prior_scores':audit.get('completed_game_inputs',{}),
+            'prior_market':audit.get('prior_market_history',{}),
             'ypp':audit.get('ypp_inputs',{}),
             'opening_quotes':audit.get('opening_quotes',{}),
         },

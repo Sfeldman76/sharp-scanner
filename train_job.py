@@ -219,8 +219,8 @@ def _v55_live_miner_coverage_contract(library_audit):
         raise ValueError('MINER_FROZEN_SYSTEM_LIBRARY_COUNT_MISMATCH')
     if sum(int((by_market.get(m) or {}).get('rules') or 0) for m in ('spreads','h2h','totals'))!=expected:
         raise ValueError('MINER_MARKET_RULE_COUNT_MISMATCH')
-    valid_atoms={'TRUE','FALSE','MISSING'}
-    valid_systems={'FIRED','FALSE_CONDITION','MISSING_ATOMS'}
+    valid_atoms={'TRUE','FALSE','MISSING','EXCLUDED_WEATHER'}
+    valid_systems={'FIRED','FALSE_CONDITION','MISSING_ATOMS','INACTIVE_WEATHER'}
     per_market={}
     total_atoms=_v55_audit_Counter()
     total_systems=_v55_audit_Counter()
@@ -263,7 +263,10 @@ def _v55_live_miner_coverage_contract(library_audit):
             'by_market':per_market,'atom_states':dict(total_atoms),
             'system_states':dict(total_systems),
             'all_seven_brains_expected':screen.get('all_seven_brains_expected',[]),
-            'feature_sources_are_observed_not_imputed':True,'bet_authority':0}
+            'feature_sources_are_observed_not_imputed':True,
+            'live_weather_excluded':total_atoms.get('EXCLUDED_WEATHER',0),
+            'actionable_missing_atom_evaluations':total_atoms.get('MISSING',0),
+            'bet_authority':0}
 
 
 def _v55_live_qualification_evidence_reconcile(gcs, bucket, backend):
