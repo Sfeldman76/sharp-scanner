@@ -2907,6 +2907,12 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit={'status':'EVALUATED_PUBLISHED_MINER_LIBRARY','library_uri':uri,
            'library_sha256':digest,'rule_count':len(rules),'market_counts':counts,
            'by_market':{},'pair_holds':dict(holds),'bet_authority':0}
+    # Non-authoritative coverage telemetry. This is NOT an additional rule
+    # engine: every status comes from the pinned frozen atom provider below.
+    # Keep NOT_EVALUATED distinct from a legitimate evaluated FALSE.
+    screen_games={}
+    screen_atom_coverage=defaultdict(lambda:Counter())
+    screen_system_coverage=defaultdict(lambda:Counter())
     prepared=[]
     live_events=list(prior)
     manifest_uri=s(os.getenv('NCAAF_V55_SEVEN_BRAIN_MANIFEST_URI'))
@@ -3156,9 +3162,40 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                         if r['name'] in V55_MINER_OPENING_ROLE_ATOMS and r['name'] not in atoms})
                     alternate_opening_games.add((gid,mkt))
             stats['source_games']+=1
+            screen_key=f'{gid}|{mkt}'
+            screen_record={'game_id':gid,'market':mkt,
+                'matchup':s(fixture.get('Matchup')),
+                'home_team':s(fixture.get('Home_Team')),
+                'away_team':s(fixture.get('Away_Team')),
+                'kickoff_utc':s(base.get('kickoff_utc')),
+                'book':s(base.get('book')),
+                'quote_observed_at_utc':s(base.get('quote_observed_at_utc')),
+                'atom_values':{},'system_status':{},
+                'available_source_fields':sorted(k for k,v in row.items()
+                    if v is not None and s(v).lower() not in ('','nan','nat','none','null','<na>')),
+                'source_status':{
+                    'cfbd_prior_snapshot':bool(source_time and source_time<=at<kickoff),
+                    'verified_spread_opener':num(row.get('Opening_Spread')) is not None,
+                    'verified_total_opener':num(row.get('Opening_Total')) is not None,
+                    'pt_snapshot_matched':gid in pt_rows,
+                    'pt_frozen_atom_fields':gid in pt_games,
+                    'expert_context':bool(expert_refs),
+                    'opponent_adjusted_ypp':gid in ypp_fields,
+                    'prior_meeting':bool(rivalry),
+                }}
+            for atom_name in sorted(market_atoms):
+                state=('TRUE' if atoms[atom_name] else 'FALSE') if atom_name in atoms else 'MISSING'
+                screen_record['atom_values'][atom_name]=state
+                screen_atom_coverage[mkt,atom_name][state]+=1
+            screen_games[screen_key]=screen_record
             for rule in market_rules:
                 rid=rule['rule_id']
                 unavailable=[name for name in rule['atoms'] if name not in atoms]
+                rule_state=('MISSING_ATOMS' if unavailable else
+                            'FALSE_CONDITION' if not all(atoms[name] for name in rule['atoms']) else
+                            'FIRED')
+                screen_record['system_status'][rid]=rule_state
+                screen_system_coverage[mkt,rid][rule_state]+=1
                 if unavailable:
                     stats['missing_inputs']+=1
                     rule_stats[rid]['missing_inputs']+=1
@@ -3242,6 +3279,38 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             except Exception as exc:
                 report={'status':'HOLD_PT_DISPERSION_ARCHIVE','error':type(exc).__name__+':'+str(exc)[:240]}
             audit['pt_current_five_dispersion_research']={**report,'live_spread_matches':dict(live)}
+    # Describe ALL frozen atoms/systems, even when no game has a complete
+    # quote pair. An empty set of evaluated games is NOT zero-valued atoms.
+    for mkt in counts:
+        names=sorted({a for r in rules if r['market']==mkt for a in r['atoms']})
+        audit['by_market'][mkt]['atom_coverage']={
+            name:{state:screen_atom_coverage[mkt,name][state]
+                  for state in ('TRUE','FALSE','MISSING')}
+            for name in names}
+        audit['by_market'][mkt]['system_coverage']={
+            r['rule_id']:{state:screen_system_coverage[mkt,r['rule_id']][state]
+                          for state in ('FIRED','FALSE_CONDITION','MISSING_ATOMS')}
+            for r in rules if r['market']==mkt}
+    audit['live_screen_inputs']={
+        'schema':'NCAAF_V55_LIVE_SCREEN_ATOMS_V1',
+        'status':'EVALUATED_RESEARCH_CONTEXT_NO_AUTHORITY',
+        'game_markets':screen_games,
+        'game_markets_evaluated':len(screen_games),
+        'rules_in_frozen_library':len(rules),
+        'atom_status_contract':'TRUE_FALSE_MISSING__NO_SYNTHETIC_VALUES',
+        'system_status_contract':'FIRED_FALSE_CONDITION_MISSING_ATOMS',
+        'all_seven_brains_expected':sorted(BRAINS),
+        'source_evidence':{
+            'original_events_by_brain':audit.get('miner_signal_manifest',{}).get('by_family',{}),
+            'expert_context':audit.get('miner_expert_quote_inputs',{}),
+            'prediction_tracker':audit.get('miner_pt_live_inputs',{}),
+            'cfbd_matchups':audit.get('recovered_cfbd_matchup_games_by_field',{}),
+            'prior_scores':audit.get('completed_game_inputs',{}),
+            'ypp':audit.get('ypp_inputs',{}),
+            'opening_quotes':audit.get('opening_quotes',{}),
+        },
+        'bet_authority':0,
+    }
     audit['capture']=capture_audit
     return captured,audit
 
@@ -5626,3 +5695,67 @@ if __name__=='__main__':
         raise SystemExit(activation_main(sys.argv[2:]))
     raise SystemExit(main())
 
+
+
+def render_v55_miner_live_screen(audit_document, *, st=None):
+    """Optional Streamlit research diagnostics panel for an existing V55 app.
+
+    Pass the complete live-scoring audit JSON or its published_miner_library
+    stage. This function displays evidence only, and never modifies any picks.
+    In the Streamlit dashboard, call:
+        backend.render_v55_miner_live_screen(latest_audit_json)
+    """
+    if st is None:
+        import streamlit as st
+    report=(audit_document or {}).get('stages',{}).get('published_miner_library')
+    if report is None:
+        report=audit_document or {}
+    screen=report.get('live_screen_inputs') or {}
+    st.subheader('NCAAF V5.5 · Frozen Miner atoms & seven-brain inputs')
+    st.caption('Research diagnostics only. Missing inputs are never interpreted as FALSE or as a betting recommendation.')
+    if screen.get('schema')!='NCAAF_V55_LIVE_SCREEN_ATOMS_V1':
+        st.info('Per-game atom coverage is not in this audit. Deploy the updated backend and run the live audit.')
+        return
+    markets=report.get('by_market') or {}
+    st.write('Frozen library rules:',screen.get('rules_in_frozen_library',0),
+             '· evaluated game/markets:',screen.get('game_markets_evaluated',0))
+    with st.expander('Coverage across all frozen atoms and systems',expanded=False):
+        for market_name in ('spreads','h2h','totals'):
+            details=markets.get(market_name,{})
+            st.markdown('**'+market_name.upper()+'**')
+            atoms=details.get('atom_coverage') or {}
+            if atoms:
+                st.dataframe([{'atom':name,**counts} for name,counts in sorted(atoms.items())],
+                             use_container_width=True,hide_index=True)
+            else:
+                st.info('No evaluated atoms for this market')
+            systems=details.get('system_coverage') or {}
+            if systems:
+                st.dataframe([{'frozen_system_id':name,**counts} for name,counts in sorted(systems.items())],
+                             use_container_width=True,hide_index=True)
+    sources=screen.get('source_evidence') or {}
+    with st.expander('Seven-brain and source coverage',expanded=False):
+        for fam in screen.get('all_seven_brains_expected') or []:
+            st.write(fam,':',sources.get('original_events_by_brain',{}).get(fam,0),
+                     'accepted original events in configured manifest')
+        st.json({k:v for k,v in sources.items() if k!='original_events_by_brain'},expanded=False)
+    games=screen.get('game_markets') or {}
+    if not games:
+        st.warning('No eligible priced game/market pairs were evaluated in this audit.')
+        return
+    choice=st.selectbox('Game · market',sorted(games),key='v55_live_atom_game_market')
+    game=games[choice]
+    st.write(game.get('matchup') or (
+        game.get('away_team','')+' @ '+game.get('home_team','')),
+        '·',game.get('market'),'·',game.get('book'))
+    st.json(game.get('source_status') or {},expanded=False)
+    values=game.get('atom_values') or {}
+    st.markdown('**Frozen atom inputs**')
+    st.dataframe([{'atom':name,'status':value} for name,value in sorted(values.items())],
+                 use_container_width=True,hide_index=True)
+    st.markdown('**Frozen system evaluations**')
+    statuses=game.get('system_status') or {}
+    st.dataframe([{'system_id':name,'status':value} for name,value in sorted(statuses.items())],
+                 use_container_width=True,hide_index=True)
+    with st.expander('Available input field names (not values)'):
+        st.write(game.get('available_source_fields') or [])
