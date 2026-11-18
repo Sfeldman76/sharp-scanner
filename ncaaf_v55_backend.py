@@ -33,6 +33,22 @@ V55_MINER_PREGAME_FIELDS=frozenset((
     'CFBD_Matchup_PPA_Per_Drive_Adv','CFBD_Matchup_Scoring_Opp_Rate_Adv',
     'CFBD_Prior_Top3_Usage_Share',
 ))
+# Exact same-side differences from the CFBD warehouse loader.
+V55_MINER_MATCHUP_COMPONENTS={
+    'CFBD_Matchup_Elo_Adv':'CFBD_Elo_Prior',
+    'CFBD_Matchup_PriorYear_SP_Adv':'CFBD_PriorYear_SP_Rating',
+    'CFBD_Matchup_PriorYear_FPI_Adv':'CFBD_PriorYear_FPI',
+    'CFBD_Matchup_Net_PPA_Adv':'CFBD_Season_Net_PPA_Prior',
+    'CFBD_Matchup_Net_Success_Adv':'CFBD_Season_Net_Success_Prior',
+    'CFBD_Matchup_EarlyDown_PPA_Adv':'CFBD_Season_CFBD_Game_Off_EarlyDown_PPA_Prior',
+    'CFBD_Matchup_PPA_Per_Drive_Adv':'CFBD_Season_CFBD_Game_Off_PPA_Per_Drive_Prior',
+}
+V55_MINER_MATCHUP_INPUTS=frozenset(
+    c for field in V55_MINER_MATCHUP_COMPONENTS.values()
+    for c in (field,'CFBD_Opp_'+field.removeprefix('CFBD_')))
+V55_MINER_OPENING_ROLE_ATOMS=frozenset(
+    ('CURRENT_FAVORITE','CURRENT_DOG',*(f'{role}_{lo}_{hi}' for role in ('FAV','DOG')
+      for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)))))
 BRAINS=frozenset(('CORE','STAT','SYSTEM_MINER','PATHI','BIG_AL','PREDICTION_TRACKER','MARKET_RICH'))
 
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False,default=str).encode()).hexdigest()
@@ -781,7 +797,8 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
     # reader to Miner. The ML feature vector still uses the requested fields.
     cfbd_rows=list(cfbd_rows)
     available_priors=sorted({key for r in cfbd_rows if isinstance(r,dict) for key in r
-                             if key.endswith('_Prior') or key in V55_MINER_PREGAME_FIELDS})
+                             if key.endswith('_Prior') or key in V55_MINER_PREGAME_FIELDS
+                             or key in V55_MINER_MATCHUP_INPUTS})
     exact_fields=V55_MINER_PREGAME_FIELDS & set(available_priors)
     exact_field_coverage=Counter()
     for r in board_rows:
@@ -998,7 +1015,8 @@ def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=No
         # The ML feature schema is only a subset of the published Miner's
         # inputs. Read available numeric priors from the approved source.
         priors.update(f.name for f in table.schema
-                      if (f.name.endswith('_Prior') or f.name in V55_MINER_PREGAME_FIELDS)
+                      if (f.name.endswith('_Prior') or f.name in V55_MINER_PREGAME_FIELDS
+                          or f.name in V55_MINER_MATCHUP_INPUTS)
                       and f.field_type.upper() in
                       ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC','BOOLEAN','BOOL'))
     wanted=['Game_ID','Team_Key','Is_Home','Game_Date','Season','Week']+optional+sorted(priors)
@@ -2343,6 +2361,76 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
                     'team_seasons_with_ypp':len(context)}
 
 
+def _v55_miner_prior_meetings(storage_client,bucket,teams):
+    import ncaaf_v55_research as research
+
+    root=f'gs://{bucket}/research/ncaaf/v55/canonical_stage1/v5_2/'
+    blobs=(research._obj_bytes(root+name,storage_client) for name in (
+        'historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
+        'stage1_canonical_ledger_v5_audit.json'))
+    _,games,_,sides,_=research._checked_canonical(*blobs)
+    meetings=defaultdict(dict)
+    for key,game in games.items():
+        if not 2013<=key[0]<=2025:
+            continue
+        rows=sides[key]
+        pair=frozenset(_v55_cfbd_school_key(team) for team in rows)
+        if len(pair)!=2 or '' in pair or any(num(row.get('team_score')) is None for row in rows.values()):
+            continue
+        try:
+            date=datetime.strptime(s(game.get('game_date'))[:10],'%Y-%m-%d').replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        meetings[pair][key]=(date,False)
+    current_sides=defaultdict(set)
+    for (season,team),history in teams.items():
+        if season>=2026:
+            for kickoff,gid,_,_ in history:
+                current_sides[season,gid,kickoff].add(team)
+    for (season,gid,kickoff),pair in current_sides.items():
+        if len(pair)==2:
+            meetings[frozenset(pair)][season,gid]=(kickoff,True)
+    return meetings
+
+
+def _v55_miner_rivalry_fields(meetings,fixture,canonical_id,kickoff,at):
+    _,home,away,_,_,_=_v55_board_fixture_identity(fixture)
+    if not canonical_id or not home or not away:
+        return {}
+    cutoff=min(kickoff,at)
+    prior=[(date,exact) for (_,gid),(date,exact) in meetings.get(frozenset((home,away)),{}).items()
+           if gid!=canonical_id and (date if exact else date+timedelta(days=1))<cutoff]
+    if not prior:
+        return {}
+    last,exact=max(prior)
+    days=(kickoff-last).total_seconds()/86400
+    # A date-only record cannot resolve this cutoff when the day spans it.
+    if not exact and 450<days<451:
+        return {}
+    return {'H2H2_Prior_Meetings':len(prior),'Days_Since_Last_Matchup':days}
+
+
+def _v55_miner_fill_matchup_fields(row,team,opponent):
+    recovered=[]
+    for field,component in V55_MINER_MATCHUP_COMPONENTS.items():
+        if field in row:
+            continue
+        home,away=num(team.get(component)),num(opponent.get(component))
+        mirrored='CFBD_Opp_'+component.removeprefix('CFBD_')
+        if home is None:
+            home=num(opponent.get(mirrored))
+        if away is None:
+            away=num(team.get(mirrored))
+        if home is not None and away is not None:
+            row[field]=home-away
+        elif (away_delta:=num(opponent.get(field))) is not None:
+            row[field]=-away_delta
+        else:
+            continue
+        recovered.append(field)
+    return recovered
+
+
 def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
                                  bq_client=None, horizon_days=7, now=None):
     """Evaluate the published full-history library with its pinned atom provider."""
@@ -2381,6 +2469,11 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     score_fields={}
     ypp_fields={}
     ypp_provenance={}
+    teams={}
+    prior_meetings={}
+    rivalry_games=set()
+    recovered_fields=defaultdict(set)
+    alternate_opening_games=set()
     audit['completed_game_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['ypp_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['box_score_version_capture']={'status':'NOT_EVALUATED'}
@@ -2452,6 +2545,23 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         except Exception as exc:
             audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
                                      'error':type(exc).__name__+':'+str(exc)[:200]}
+    if pairs and any('CFBD_RIVALRY_PROXY_RECURRING' in r['atoms'] for r in rules):
+        try:
+            prior_meetings=_v55_miner_prior_meetings(storage_client,bucket,teams)
+            audit['rivalry_history']={'status':'READ','pairs_in_source':len(prior_meetings)}
+        except Exception as exc:
+            audit['rivalry_history']={'status':'HOLD_CFBD_MEETING_HISTORY',
+                                      'error':type(exc).__name__+':'+str(exc)[:240]}
+    opening_spreads=defaultdict(list)
+    for (gid,mkt,book),sides in books.items():
+        if mkt!='spreads' or len(sides)!=2:
+            continue
+        q=sides['HOME']
+        stamp=clock(q['quote_observed_at_utc'])
+        kick=clock(q['kickoff_utc'])
+        opener=openers.get((gid,mkt,book,q['line'],q['odds'],stamp,kick))
+        if opener is not None:
+            opening_spreads[gid].append((stamp,book,kick,opener))
     for mkt in counts:
         market_rules=[r for r in rules if r['market']==mkt]
         stats={'rules':len(market_rules),'source_games':0,'fired':0,'not_met':0,
@@ -2468,11 +2578,20 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             source_time=clock(source.get('feature_asof_utc'))
             base=sides['OVER' if mkt=='totals' else 'HOME']
             kickoff=clock(base['kickoff_utc'])
-            home_priors=(source.get('team_side_features') or {}).get('HOME',{})
+            side_priors=source.get('team_side_features') or {}
+            home_priors=side_priors.get('HOME',{})
             row={k:v for k,v in home_priors.items() if num(v) is not None} if (
                 source_time and source_time<=at<kickoff) else {}
+            if source_time and source_time<=at<kickoff:
+                for field in _v55_miner_fill_matchup_fields(row,home_priors,side_priors.get('AWAY',{})):
+                    recovered_fields[field].add(gid)
             row.update(score_fields.get(gid,{}))
             row.update(ypp_fields.get(gid,{}))
+            canonical_id=_v55_live_id(source.get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
+            rivalry=_v55_miner_rivalry_fields(prior_meetings,fixture,canonical_id,kickoff,at)
+            if rivalry:
+                row.update(rivalry)
+                rivalry_games.add(gid)
             row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
                        Season=fixture.get('Season'),Week=fixture.get('Week'),
                        Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
@@ -2492,6 +2611,21 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                 pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
                 market=mkt,enforce_support_floor=False)}
+            alternate_book=None
+            if 'Opening_Spread' not in row and any(
+                    V55_MINER_OPENING_ROLE_ATOMS.intersection(r['atoms']) for r in market_rules):
+                alternatives=[(stamp,book,line) for stamp,book,kick,line in opening_spreads.get(gid,())
+                              if book!=base['book'] and kick==kickoff]
+                if alternatives:
+                    _,alternate_book,line=max(alternatives)
+                    # An alternate recorded opener can supply the frozen role
+                    # atoms only. Keep the execution quote and movement inputs intact.
+                    alternate_row={**row,'Opening_Spread':line}
+                    atoms.update({r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
+                        pd.DataFrame([alternate_row]).dropna(axis=1,how='all'),for_live=True,
+                        market=mkt,enforce_support_floor=False)
+                        if r['name'] in V55_MINER_OPENING_ROLE_ATOMS and r['name'] not in atoms})
+                    alternate_opening_games.add((gid,mkt))
             stats['source_games']+=1
             for rule in market_rules:
                 rid=rule['rule_id']
@@ -2530,6 +2664,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'direction_verified':True,'original_event_created_prospectively':True,
                     'prospective_evaluation_after_quote':True,'producer':V55_LIBRARY_MINER_PRODUCER,
                     **({'opponent_adjusted_ypp_provenance':feature_provenance} if feature_provenance else {}),
+                    **({'opening_role_reference_book':alternate_book} if alternate_book and
+                        V55_MINER_OPENING_ROLE_ATOMS.intersection(rule['atoms']) else {}),
                     'quote_capture_ref':q.get('quote_capture_ref') or
                         'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(exact[:-1]),
                     'qualification_level':'HISTORICAL_SCREEN_ONLY','capture_id':cid,'bet_authority':0})
@@ -2537,6 +2673,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         stats['rules_by_id']={rid:{**counts,'missing_atoms':dict(rule_missing[rid])}
                               for rid,counts in rule_stats.items()}
     captured,capture_audit=persist_v55_prospective_events(prepared,storage_client,bucket,now=at)
+    audit.setdefault('rivalry_history',{'status':'NOT_EVALUATED'})['games_with_prior_meetings']=len(rivalry_games)
+    audit['recovered_cfbd_matchup_games_by_field']={field:len(gids) for field,gids in recovered_fields.items()}
+    audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
     audit['capture']=capture_audit
     return captured,audit
 
