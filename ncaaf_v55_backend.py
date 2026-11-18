@@ -2739,34 +2739,50 @@ def _v55_pt_portal_history(bq,games,team_map):
 
 
 def _v55_pt_dispersion_research(gcs,bq,bucket,sources,team_key,parse_csv):
-    """Grade two specified HOME candidates at the canonical archived opener."""
+    """Research-only current-five PT dispersion, joining undated season archives.
+
+    PT archive CSVs have no game date; never join on their missing date.
+    Use season + *ordered*, exact normalized aliases and require a single
+    canonical fixture. Do not infer identity from scores, prices, week offsets,
+    fuzzy similarity, or a broad team-name prefix. Repeated/ambiguous games HOLD.
+    """
     import ncaaf_v55_research as research
 
     root=f'gs://{bucket}/research/ncaaf/v55/canonical_stage1/v5_2/'
     _,games,_,team_map,_=research._checked_canonical(*(research._obj_bytes(root+name,gcs) for name in (
         'historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
         'stage1_canonical_ledger_v5_audit.json')))
-    portal,portal_sources=_v55_pt_portal_history(bq,games,team_map)
+    # Portal prior values are not proven historical pregame captures merely
+    # because the column ends in _Prior. Never grade the portal combination
+    # against potentially backfilled postgame-named snapshots.
+    portal_sources={'status':'HOLD_HISTORICAL_PREGAME_VINTAGE_NOT_CERTIFIED',
+                    'portal_combo_graded':False,
+                    'reason':'NO_ORIGINAL_PREKICK_FEATURE_CAPTURE_FOR_HISTORICAL_PORTAL_PPA'}
     identities=defaultdict(set)
     grade_inputs={}
     for game,fixture in games.items():
         year,_=game
         day=s(fixture.get('game_date'))[:10]
-        if not 2013<=year<=2025 or not _v55_pt_iso_date(day) or fixture.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+        if not 2022<=year<=2025 or not _v55_pt_iso_date(day) or fixture.get('role_verification_status')!='HOME_AWAY_VERIFIED':
             continue
         sides={s(side.get('is_home_verified')):(key,side) for key,side in team_map[game].items()}
         if sides.keys()!={'0','1'}:
             continue
         (hk,home),(ak,away)=sides['1'],sides['0']
-        for h in {team_key(hk),team_key(s(home.get('source_team_label')))}-{''}:
-            for a in {team_key(ak),team_key(s(away.get('source_team_label')))}-{''}:
+        # The existing PT parser and frozen canonical source both provide
+        # school aliases. Normalize each explicitly supplied name, not a
+        # guess at mascot/school substrings.
+        homes={team_key(v) for v in (hk,s(home.get('source_team_label'))) if s(v)}-{''}
+        aways={team_key(v) for v in (ak,s(away.get('source_team_label'))) if s(v)}-{''}
+        for h in homes:
+            for a in aways:
                 if h!=a:
-                    identities[year,day,h,a].add(game)
+                    identities[year,h,a].add(game)
         line,mirror=num(home.get('retrospective_open_spread')),num(away.get('retrospective_open_spread'))
         hp,ap=num(home.get('team_score')),num(away.get('team_score'))
         if (line is not None and abs(line)<=100 and (mirror is None or abs(line+mirror)<1e-7)
                 and hp is not None and ap is not None and hp>=0 and ap>=0
-                and hp==int(hp) and ap==int(ap) and hp!=ap
+                and hp==int(hp) and ap==int(ap)
                 and hp==num(away.get('opponent_score')) and ap==num(home.get('opponent_score'))):
             grade_inputs[game]=(line,hp,ap)
 
@@ -2784,16 +2800,22 @@ def _v55_pt_dispersion_research(gcs,bq,bucket,sources,team_key,parse_csv):
             archives[year]={'status':type(exc).__name__,'detail':str(exc)[:180]}
             continue
         matches=defaultdict(list)
+        example_holds=[]
         for row in frame.to_dict('records'):
-            key=(year,s(row.get('game_date')),team_key(s(row.get('home_key'))),team_key(s(row.get('away_key'))))
-            candidates=identities.get(key,())
+            home,away=team_key(s(row.get('home_key'))),team_key(s(row.get('away_key')))
+            candidates=identities.get((year,home,away),()) if home and away and home!=away else ()
             if len(candidates)!=1:
-                counts['ambiguous_identity' if candidates else 'unmatched_identity']+=1
+                reason='ambiguous_identity' if candidates else 'unmatched_identity'
+                counts[reason]+=1
+                if len(example_holds)<10:
+                    example_holds.append({'home':s(row.get('home_raw') or row.get('home_key')),
+                                          'away':s(row.get('away_raw') or row.get('away_key')),
+                                          'reason':reason,'candidate_count':len(candidates)})
                 continue
             matches[next(iter(candidates))].append(row)
         for game,rows in matches.items():
             if len(rows)!=1:
-                counts['duplicate_forecast_games']+=1
+                counts['duplicate_forecast_games']+=len(rows)
                 continue
             counts['unique_matches']+=1
             n,dispersion=_v55_pt_current_dispersion(rows[0],sources)
@@ -2803,17 +2825,14 @@ def _v55_pt_dispersion_research(gcs,bq,bucket,sources,team_key,parse_csv):
                 continue
             line,hp,ap=grade_inputs[game]
             outcome={'WIN':'wins','LOSS':'losses','PUSH':'pushes'}[research.grade('spreads','HOME',line,hp,ap)]
-            cohorts=['standalone']
-            if game in portal:
-                counts['graded_with_portal_field']+=1
-                if portal[game]>=.75:
-                    cohorts.append('portal_top25')
-            for cohort in cohorts:
-                for size in (str(n),'3plus'):
-                    bucket_key='le3' if dispersion<=3 else 'gt3'
-                    groups[f'{cohort}_{size}_{bucket_key}'][year][outcome]+=1
+            for size in (str(n),'3plus'):
+                key='le3' if dispersion<=3 else 'gt3'
+                groups[f'standalone_{size}_{key}'][year][outcome]+=1
+            counts['graded']+=1
         archives[year]={'status':parsed.get('status'),'source_ref':f'gs://{bucket}/{path}#{blob.generation}',
-                        'sha256':hashlib.sha256(payload).hexdigest(),'rows':len(frame),**counts}
+                        'sha256':hashlib.sha256(payload).hexdigest(),'rows':len(frame),
+                        'identity_join':'UNIQUE_SEASON_ORDERED_TEAM_ALIAS_NO_DATE_OR_WEEK',
+                        'identity_holds_examples':example_holds,**counts}
 
     results={}
     for key,years in sorted(groups.items()):
@@ -2826,6 +2845,8 @@ def _v55_pt_dispersion_research(gcs,bq,bucket,sources,team_key,parse_csv):
             'rule_candidates':['PT_CURRENT5_DISPERSION_LE3_HOME','PT_CURRENT5_DISPERSION_LE3_PORTAL_TOP25_HOME'],
             'forecasters':dict(sources),'historical_archives':archives,'portal_sources':portal_sources,
             'grade_basis':'CANONICAL_RETROSPECTIVE_HOME_OPENER',
+            'identity_join':'UNIQUE_SEASON_ORDERED_TEAM_ALIAS_NO_DATE_OR_WEEK',
+            'portal_combo_status':'HOLD_HISTORICAL_PREGAME_VINTAGE_NOT_CERTIFIED',
             'original_pregame_forecast_capture_certified':False,
             'independent_out_of_sample':False,'bet_authority':0,'results':results}
 
