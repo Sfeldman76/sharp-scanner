@@ -2696,6 +2696,140 @@ def _v55_miner_fill_conference_atoms(atoms,rule_atoms):
                     atoms.setdefault(name,False)
 
 
+def _v55_pt_current_dispersion(row,sources):
+    from statistics import pstdev
+
+    values=[value for field in sources.values() if (value:=num(row.get(field))) is not None]
+    return len(values),pstdev(values) if len(values)>=3 else None
+
+
+def _v55_pt_portal_history(bq,games,team_map):
+    """Read the pregame portal field already used by the frozen rule."""
+    field='CFBD_Portal_Net_PriorPPA_Pct'
+    values=defaultdict(set)
+    coverage={}
+    for name in ('ncaaf_cfbd_miner_features_postgame_v1','ncaaf_cfbd_archive_research_v1'):
+        table=f'sharplogger.sharp_data.{name}'
+        try:
+            columns={f.name for f in bq.get_table(table).schema}
+            if not {'Game_ID','Game_Date','Team_Key',field}<=columns:
+                coverage[name]='FIELD_UNAVAILABLE'
+                continue
+            year='SAFE_CAST(Season AS INT64)' if 'Season' in columns else 'EXTRACT(YEAR FROM Game_Date)'
+            rows=bq.query(f'SELECT {year} AS year, Game_ID, Game_Date, Team_Key, {field} '
+                          f'FROM `{table}` WHERE {year} BETWEEN 2013 AND 2025').result()
+            for row in rows:
+                game=(row['year'],_v55_live_id(row['Game_ID']))
+                fixture=games.get(game)
+                value=num(row[field])
+                if (not fixture or fixture.get('role_verification_status')!='HOME_AWAY_VERIFIED'
+                        or value is None or not 0<=value<=1
+                        or s(row['Game_Date'])[:10]!=s(fixture.get('game_date'))[:10]):
+                    continue
+                key=_v55_cfbd_school_key(row['Team_Key'])
+                roles=[s(side.get('is_home_verified')) for name,side in team_map[game].items()
+                       if key and key in {_v55_cfbd_school_key(name),
+                                          _v55_cfbd_school_key(side.get('source_team_label'))}]
+                if roles==['1']:
+                    values[game].add(value)
+            coverage[name]='READ'
+        except Exception as exc:
+            coverage[name]=type(exc).__name__+':'+str(exc)[:180]
+    return {game:next(iter(v)) for game,v in values.items() if len(v)==1},coverage
+
+
+def _v55_pt_dispersion_research(gcs,bq,bucket,sources,team_key,parse_csv):
+    """Grade two specified HOME candidates at the canonical archived opener."""
+    import ncaaf_v55_research as research
+
+    root=f'gs://{bucket}/research/ncaaf/v55/canonical_stage1/v5_2/'
+    _,games,_,team_map,_=research._checked_canonical(*(research._obj_bytes(root+name,gcs) for name in (
+        'historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
+        'stage1_canonical_ledger_v5_audit.json')))
+    portal,portal_sources=_v55_pt_portal_history(bq,games,team_map)
+    identities=defaultdict(set)
+    grade_inputs={}
+    for game,fixture in games.items():
+        year,_=game
+        day=s(fixture.get('game_date'))[:10]
+        if not 2013<=year<=2025 or not _v55_pt_iso_date(day) or fixture.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            continue
+        sides={s(side.get('is_home_verified')):(key,side) for key,side in team_map[game].items()}
+        if sides.keys()!={'0','1'}:
+            continue
+        (hk,home),(ak,away)=sides['1'],sides['0']
+        for h in {team_key(hk),team_key(s(home.get('source_team_label')))}-{''}:
+            for a in {team_key(ak),team_key(s(away.get('source_team_label')))}-{''}:
+                if h!=a:
+                    identities[year,day,h,a].add(game)
+        line,mirror=num(home.get('retrospective_open_spread')),num(away.get('retrospective_open_spread'))
+        hp,ap=num(home.get('team_score')),num(away.get('team_score'))
+        if (line is not None and abs(line)<=100 and (mirror is None or abs(line+mirror)<1e-7)
+                and hp is not None and ap is not None and hp>=0 and ap>=0
+                and hp==int(hp) and ap==int(ap) and hp!=ap
+                and hp==num(away.get('opponent_score')) and ap==num(home.get('opponent_score'))):
+            grade_inputs[game]=(line,hp,ap)
+
+    archives={}
+    groups=defaultdict(lambda:defaultdict(Counter))
+    for year in range(2013,2026):
+        path=f'research/ncaaf/external/prediction_tracker/raw/ncaa{year}.csv'
+        blob=gcs.bucket(bucket).blob(path)
+        counts=Counter()
+        try:
+            blob.reload()
+            payload=gcs.bucket(bucket).blob(path,generation=blob.generation).download_as_bytes()
+            frame,parsed=parse_csv(payload,year,source_context='V55_DISPERSION_ARCHIVE',log_func=lambda *_:None)
+        except Exception as exc:
+            archives[year]={'status':type(exc).__name__,'detail':str(exc)[:180]}
+            continue
+        matches=defaultdict(list)
+        for row in frame.to_dict('records'):
+            key=(year,s(row.get('game_date')),team_key(s(row.get('home_key'))),team_key(s(row.get('away_key'))))
+            candidates=identities.get(key,())
+            if len(candidates)!=1:
+                counts['ambiguous_identity' if candidates else 'unmatched_identity']+=1
+                continue
+            matches[next(iter(candidates))].append(row)
+        for game,rows in matches.items():
+            if len(rows)!=1:
+                counts['duplicate_forecast_games']+=1
+                continue
+            counts['unique_matches']+=1
+            n,dispersion=_v55_pt_current_dispersion(rows[0],sources)
+            counts[f'matched_with_{n}_forecasters']+=1
+            if dispersion is None or game not in grade_inputs:
+                counts['ungraded']+=1
+                continue
+            line,hp,ap=grade_inputs[game]
+            outcome={'WIN':'wins','LOSS':'losses','PUSH':'pushes'}[research.grade('spreads','HOME',line,hp,ap)]
+            cohorts=['standalone']
+            if game in portal:
+                counts['graded_with_portal_field']+=1
+                if portal[game]>=.75:
+                    cohorts.append('portal_top25')
+            for cohort in cohorts:
+                for size in (str(n),'3plus'):
+                    bucket_key='le3' if dispersion<=3 else 'gt3'
+                    groups[f'{cohort}_{size}_{bucket_key}'][year][outcome]+=1
+        archives[year]={'status':parsed.get('status'),'source_ref':f'gs://{bucket}/{path}#{blob.generation}',
+                        'sha256':hashlib.sha256(payload).hexdigest(),'rows':len(frame),**counts}
+
+    results={}
+    for key,years in sorted(groups.items()):
+        grades={year:{k:cnt[k] for k in ('wins','losses','pushes')} for year,cnt in years.items()}
+        wins=sum(r['wins'] for r in grades.values())
+        losses=sum(r['losses'] for r in grades.values())
+        results[key]={'by_season':grades,'cover_rate':wins/(wins+losses) if wins+losses else None,
+                      'screen':v55_full_history_statistical_screen(grades)}
+    return {'status':'GRADED_RECONSTRUCTED_HISTORY' if results else 'NO_GRADEABLE_ARCHIVE_ROWS',
+            'rule_candidates':['PT_CURRENT5_DISPERSION_LE3_HOME','PT_CURRENT5_DISPERSION_LE3_PORTAL_TOP25_HOME'],
+            'forecasters':dict(sources),'historical_archives':archives,'portal_sources':portal_sources,
+            'grade_basis':'CANONICAL_RETROSPECTIVE_HOME_OPENER',
+            'original_pregame_forecast_capture_certified':False,
+            'independent_out_of_sample':False,'bet_authority':0,'results':results}
+
+
 def _v55_miner_pt_fields(pt,opening,weights):
     """Use the frozen home-margin convention against the recorded spread opener."""
     from statistics import pstdev
@@ -3065,6 +3199,28 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit['pt_spread_blocker_atoms']={
         name:{state:blocker_counts[name,state] for state in ('true','false','missing')}
         for name in ('META_PT_LOW_DISPERSION_LE3','TEAM_OFF_RESULT_UNDERPERFORMANCE')}
+    if truth(os.getenv('NCAAF_V55_PT_DISPERSION_RESEARCH')):
+        sources=atom_globals.get('PT_STABLE_FIVE_SHADOW_SOURCES',{})
+        parser=atom_globals.get('_pt_parse_csv')
+        expected={'PI_RATE_BIAS':'PI_RATE_BIAS','KEEPER':'KEEPER','ESPN_FPI':'ESPN_FPI',
+                  'MASSEY':'ptidx__linemassey','SAGARIN_PREDICTOR':'ptidx__linesagpred'}
+        if sources!=expected or not callable(parser) or not callable(atom_globals.get('_pt_team_key')):
+            audit['pt_current_five_dispersion_research']={'status':'HOLD_EXISTING_PT_CONTRACT_UNAVAILABLE'}
+        else:
+            live=Counter()
+            for gid,mkt in pairs:
+                if mkt!='spreads' or gid not in pt_rows:
+                    continue
+                count,dispersion=_v55_pt_current_dispersion(pt_rows[gid][0],sources)
+                live[f'{count}_forecasters']+=1
+                if dispersion is not None and dispersion<=3:
+                    live[f'{count}_forecasters_le3']+=1
+            try:
+                report=_v55_pt_dispersion_research(storage_client,bq_client,bucket,sources,
+                                                   atom_globals['_pt_team_key'],parser)
+            except Exception as exc:
+                report={'status':'HOLD_PT_DISPERSION_ARCHIVE','error':type(exc).__name__+':'+str(exc)[:240]}
+            audit['pt_current_five_dispersion_research']={**report,'live_spread_matches':dict(live)}
     audit['capture']=capture_audit
     return captured,audit
 
