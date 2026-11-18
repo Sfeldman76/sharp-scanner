@@ -46,6 +46,14 @@ V55_MINER_MATCHUP_COMPONENTS={
 V55_MINER_MATCHUP_INPUTS=frozenset(
     c for field in V55_MINER_MATCHUP_COMPONENTS.values()
     for c in (field,'CFBD_Opp_'+field.removeprefix('CFBD_')))
+V55_MINER_ADDITIONAL_PRIORS=frozenset((
+    'CFBD_Portal_In_4StarPlus','CFBD_Portal_Out_4StarPlus',
+    'CFBD_Portal_Net_Rating','CFBD_Portal_Net_Prior_TotalPPA','CFBD_Portal_Net_Prior_Usage',
+    'CFBD_Portal_Net_PriorPPA_Pct','CFBD_Prior_PPA_Return_Pct','CFBD_Prior_Usage_Return_Pct',
+    'CFBD_QB_Game_PPA_SeasonPrior','CFBD_Opp_QB_Game_PPA_SeasonPrior',
+    'CFBD_QB_Game_Pass_Success_SeasonPrior','CFBD_Opp_QB_Game_Pass_Success_SeasonPrior',
+))
+V55_MINER_PREGAME_LABELS=frozenset(('CFBD_Conference','CFBD_Opp_Conference','Opponent_Subdivision'))
 V55_MINER_OPENING_ROLE_ATOMS=frozenset(
     ('CURRENT_FAVORITE','CURRENT_DOG',*(f'{role}_{lo}_{hi}' for role in ('FAV','DOG')
       for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)))))
@@ -798,7 +806,8 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
     cfbd_rows=list(cfbd_rows)
     available_priors=sorted({key for r in cfbd_rows if isinstance(r,dict) for key in r
                              if key.endswith('_Prior') or key in V55_MINER_PREGAME_FIELDS
-                             or key in V55_MINER_MATCHUP_INPUTS})
+                             or key in V55_MINER_MATCHUP_INPUTS or key in V55_MINER_ADDITIONAL_PRIORS
+                             or key in V55_MINER_PREGAME_LABELS})
     exact_fields=V55_MINER_PREGAME_FIELDS & set(available_priors)
     exact_field_coverage=Counter()
     for r in board_rows:
@@ -1016,9 +1025,10 @@ def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=No
         # inputs. Read available numeric priors from the approved source.
         priors.update(f.name for f in table.schema
                       if (f.name.endswith('_Prior') or f.name in V55_MINER_PREGAME_FIELDS
-                          or f.name in V55_MINER_MATCHUP_INPUTS)
+                          or f.name in V55_MINER_MATCHUP_INPUTS or f.name in V55_MINER_ADDITIONAL_PRIORS)
                       and f.field_type.upper() in
                       ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC','BOOLEAN','BOOL'))
+        optional.extend(sorted(V55_MINER_PREGAME_LABELS & fields))
     wanted=['Game_ID','Team_Key','Is_Home','Game_Date','Season','Week']+optional+sorted(priors)
     sql=('SELECT '+','.join('`'+c+'`' for c in wanted)+f' FROM `{table_id}` '
          # Include a bounded earlier CFBD midnight sentinel so an actual
@@ -2381,15 +2391,16 @@ def _v55_miner_prior_meetings(storage_client,bucket,teams):
             date=datetime.strptime(s(game.get('game_date'))[:10],'%Y-%m-%d').replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-        meetings[pair][key]=(date,False)
-    current_sides=defaultdict(set)
+        scores={_v55_cfbd_school_key(team):num(row.get('team_score')) for team,row in rows.items()}
+        meetings[pair][key]=(date,False,scores)
+    current_sides=defaultdict(dict)
     for (season,team),history in teams.items():
         if season>=2026:
-            for kickoff,gid,_,_ in history:
-                current_sides[season,gid,kickoff].add(team)
-    for (season,gid,kickoff),pair in current_sides.items():
-        if len(pair)==2:
-            meetings[frozenset(pair)][season,gid]=(kickoff,True)
+            for kickoff,gid,points,_ in history:
+                current_sides[season,gid,kickoff][team]=points
+    for (season,gid,kickoff),scores in current_sides.items():
+        if len(scores)==2:
+            meetings[frozenset(scores)][season,gid]=(kickoff,True,scores)
     return meetings
 
 
@@ -2398,16 +2409,25 @@ def _v55_miner_rivalry_fields(meetings,fixture,canonical_id,kickoff,at):
     if not canonical_id or not home or not away:
         return {}
     cutoff=min(kickoff,at)
-    prior=[(date,exact) for (_,gid),(date,exact) in meetings.get(frozenset((home,away)),{}).items()
+    prior=[(date,exact,scores) for (_,gid),(date,exact,scores) in
+           meetings.get(frozenset((home,away)),{}).items()
            if gid!=canonical_id and (date if exact else date+timedelta(days=1))<cutoff]
     if not prior:
         return {}
-    last,exact=max(prior)
+    prior.sort(key=lambda item:item[0],reverse=True)
+    last,exact,_=prior[0]
     days=(kickoff-last).total_seconds()/86400
+    fields={'H2H2_Prior_Meetings':len(prior)}
     # A date-only record cannot resolve this cutoff when the day spans it.
-    if not exact and 450<days<451:
-        return {}
-    return {'H2H2_Prior_Meetings':len(prior),'Days_Since_Last_Matchup':days}
+    if exact or not 450<days<451:
+        fields['Days_Since_Last_Matchup']=days
+    if len({date for date,_,_ in prior})==len(prior):
+        margins=[scores[home]-scores[away] for _,_,scores in prior]
+        fields.update(Last_Matchup_Margin=margins[0],Opp_Last_Matchup_Margin=-margins[0],
+                      Revenge_Flag=int(margins[0]<0),Opp_Revenge_Flag=int(margins[0]>0),
+                      Revenge_Depth=next((i for i,m in enumerate(margins) if m>=0),len(margins)),
+                      Opp_Revenge_Depth=next((i for i,m in enumerate(margins) if m<=0),len(margins)))
+    return fields
 
 
 def _v55_miner_fill_matchup_fields(row,team,opponent):
@@ -2429,6 +2449,91 @@ def _v55_miner_fill_matchup_fields(row,team,opponent):
             continue
         recovered.append(field)
     return recovered
+
+
+def _v55_miner_expert_quote_fields(events,board_rows,at):
+    """Map recorded directional expert firings into their frozen side fields."""
+    canonical,identity_audit=canonicalize_live_signal_game_ids(events,board_rows)
+    values=defaultdict(dict)
+    counts=Counter()
+    allowed=set(V55_EXPERT_REFERENCE_RULES)|{('PATHI',sid) for sid in V55_PATHI_MOVEMENT_RECIPE_IDS}
+    for event in canonical:
+        fam,sid=family(event.get('source_family')),s(event.get('system_id'))
+        if (fam,sid) not in allowed or market(event.get('market'))!='spreads':
+            continue
+        side=s(event.get('side')).upper()
+        observed=clock(event.get('signal_observed_at_utc'))
+        quoted=clock(event.get('quote_observed_at_utc'))
+        kickoff=clock(event.get('kickoff_utc'))
+        if (side not in ('HOME','AWAY') or not all((observed,quoted,kickoff))
+                or max(observed,quoted)>at or at>=kickoff
+                or not truth(event.get('direction_verified'))
+                or not s(event.get('signal_capture_ref')) or not s(event.get('quote_capture_ref'))):
+            continue
+        if fam=='PATHI' and num(event.get('trigger_opening_spread')) is None:
+            continue
+        line,odds=num(event.get('line')),num(event.get('odds'))
+        if line is None or odds is None or not s(event.get('book')):
+            continue
+        key=(s(event['game_id']),s(event['book']).lower(),side,line,odds,quoted,kickoff)
+        values[key][sid+('__ROAD_SIDE' if side=='AWAY' else '')]=s(event['signal_capture_ref'])
+        counts[fam]+=1
+    return values,{'canonical_events_by_family':identity_audit.get('by_family_matched',{}),
+                   'mapped_expert_events_by_family':dict(counts),'mapped_spread_contexts':len(values)}
+
+
+def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key):
+    """Read the existing PT live-only forecast file with exact date and side identity."""
+    name='research/ncaaf/external/prediction_tracker/current_live.csv'
+    stored=storage_client.bucket(bucket)
+    blob=stored.blob(name)
+    blob.reload()
+    observed=clock(blob.time_created)
+    if not observed or observed>at or not blob.generation:
+        raise ValueError('PT_LIVE_GENERATION_WITHOUT_PREGAME_OBSERVATION')
+    payload=stored.blob(name,generation=blob.generation).download_as_bytes()
+    grouped=defaultdict(list)
+    for row in csv.DictReader(io.StringIO(payload.decode('utf-8-sig'))):
+        home,away=(team_key(s(row.get(c))) for c in ('home_key','away_key'))
+        if home and away and home!=away:
+            grouped[(_v55_live_id(row.get('season')),s(row.get('game_date'))[:10],home,away)].append(row)
+    matches={}
+    for fixture in board_rows:
+        gid=s(fixture.get('Game_ID'))
+        kickoff=clock(fixture.get('Game_Start_UTC'))
+        home,away=(team_key(s(fixture.get(c))) for c in ('Home_Team','Away_Team'))
+        if not gid or not kickoff or not observed<=at<kickoff or not home or not away:
+            continue
+        day=kickoff.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+        rows=grouped.get((_v55_live_id(fixture.get('Season')),day,home,away),())
+        if len(rows)==1:
+            matches[gid]=rows[0]
+    return matches,{'status':'READ','matched_games':len(matches),'source_generation':str(blob.generation),
+                    'observed_at_utc':observed.isoformat(),
+                    'source_ref':f'gs://{bucket}/{name}#{blob.generation}'}
+
+
+def _v55_miner_pt_fields(pt,opening,weights):
+    """Use the frozen home-margin convention against the recorded spread opener."""
+    from statistics import pstdev
+    import re
+
+    out={}
+    for name,raw in pt.items():
+        if not name.startswith('ptidx__') or (value:=num(raw)) is None:
+            continue
+        code=re.sub(r'[^A-Z0-9]+','_',name.removeprefix('ptidx__').upper())
+        if code:
+            out[f'_V218_PTIDX_{code}_EDGE_POINTS']=value+opening
+    components={name:value for name in weights if (value:=num(pt.get(name))) is not None}
+    for name,value in components.items():
+        out[f'_V212_PT_{name}_EDGE_POINTS']=value+opening
+    if len(components)==5:
+        out['_V210_PT_META_SYSTEM_COUNT']=5
+        out['_V212_PT_COMPONENT_STD']=pstdev(components.values())
+        if (meta:=num(pt.get('meta_margin_home'))) is not None:
+            out['_V210_PT_META_EDGE_POINTS']=meta+opening
+    return out
 
 
 def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
@@ -2465,6 +2570,33 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
            'library_sha256':digest,'rule_count':len(rules),'market_counts':counts,
            'by_market':{},'pair_holds':dict(holds),'bet_authority':0}
     prepared=[]
+    live_events=list(prior)
+    manifest_uri=s(os.getenv('NCAAF_V55_SEVEN_BRAIN_MANIFEST_URI'))
+    try:
+        if not manifest_uri and storage_client.bucket(bucket).blob(V55_DEFAULT_LIVE_MANIFEST_KEY).exists():
+            manifest_uri=f'gs://{bucket}/{V55_DEFAULT_LIVE_MANIFEST_KEY}'
+        if manifest_uri:
+            imported,source_audit=read_seven_brain_signal_sources(
+                manifest_uri,bq_client,now=at,storage_client=storage_client)
+            live_events.extend(imported)
+            audit['miner_signal_manifest']=source_audit
+    except Exception as exc:
+        audit['miner_signal_manifest']={'status':'HOLD_LIVE_SIGNAL_SOURCE',
+                                        'error':type(exc).__name__+':'+str(exc)[:240]}
+    expert_fields,audit['miner_expert_quote_inputs']=_v55_miner_expert_quote_fields(live_events,board_rows,at)
+    supported_expert_games=set()
+    atom_globals=getattr(evaluate_atoms,'__globals__',{})
+    rivalry_detector=atom_globals.get('_v230_is_rivalry')
+    pt_rows={}
+    pt_games=set()
+    pt_weights=atom_globals.get('PT_PUBLISHED_WEIGHTS',{})
+    if pairs and callable(pt_key:=atom_globals.get('_pt_team_key')):
+        try:
+            pt_rows,audit['miner_pt_live_inputs']=_v55_miner_current_pt_rows(
+                storage_client,bucket,board_rows,at,pt_key)
+        except Exception as exc:
+            audit['miner_pt_live_inputs']={'status':'HOLD_PT_LIVE_FORECAST_SOURCE',
+                                           'error':type(exc).__name__+':'+str(exc)[:240]}
     openers={}
     score_fields={}
     ypp_fields={}
@@ -2545,7 +2677,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         except Exception as exc:
             audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
                                      'error':type(exc).__name__+':'+str(exc)[:200]}
-    if pairs and any('CFBD_RIVALRY_PROXY_RECURRING' in r['atoms'] for r in rules):
+    if pairs and any(any(term in atom for term in ('RIVALRY','H2H','REVENGE','LAST_MATCHUP'))
+                     for r in rules for atom in r['atoms']):
         try:
             prior_meetings=_v55_miner_prior_meetings(storage_client,bucket,teams)
             audit['rivalry_history']={'status':'READ','pairs_in_source':len(prior_meetings)}
@@ -2585,6 +2718,12 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             if source_time and source_time<=at<kickoff:
                 for field in _v55_miner_fill_matchup_fields(row,home_priors,side_priors.get('AWAY',{})):
                     recovered_fields[field].add(gid)
+                for target,field in (('Conference','CFBD_Conference'),
+                                     ('Opponent_Conference','CFBD_Opp_Conference'),
+                                     ('Opponent_Subdivision','Opponent_Subdivision')):
+                    val=s(home_priors.get(field))
+                    if val and val.lower() not in ('nan','unknown','none','null','<na>'):
+                        row[target]=val
             row.update(score_fields.get(gid,{}))
             row.update(ypp_fields.get(gid,{}))
             canonical_id=_v55_live_id(source.get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
@@ -2592,6 +2731,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             if rivalry:
                 row.update(rivalry)
                 rivalry_games.add(gid)
+            if callable(rivalry_detector) and fixture.get('Home_Team') and fixture.get('Away_Team'):
+                row['Rivalry_Flag']=int(rivalry_detector(
+                    s(fixture['Home_Team']).lower(),s(fixture['Away_Team']).lower()))
             row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
                        Season=fixture.get('Season'),Week=fixture.get('Week'),
                        Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
@@ -2608,9 +2750,29 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     row['Opening_'+suffix]=opener
             # Do not map current quotes into opening fields. Venue atoms
             # require a verified site role, which this fixture feed lacks.
+            expert_refs={}
+            pt_ref=None
+            if mkt=='spreads':
+                for q in sides.values():
+                    key=(gid,s(q['book']).lower(),s(q['side']).upper(),num(q['line']),num(q['odds']),
+                         clock(q['quote_observed_at_utc']),kickoff)
+                    expert_refs.update(expert_fields.get(key,{}))
+                if expert_refs:
+                    row.update(dict.fromkeys(expert_refs,1))
+                    supported_expert_games.add(gid)
+                if gid in pt_rows and (opening:=num(row.get('Opening_Spread'))) is not None:
+                    fields=_v55_miner_pt_fields(pt_rows[gid],opening,pt_weights)
+                    if fields:
+                        row.update(fields)
+                        pt_games.add(gid)
+                        pt_ref=audit['miner_pt_live_inputs']['source_ref']
             atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                 pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
                 market=mkt,enforce_support_floor=False)}
+            # Verified positive firings give a lower bound, so an incomplete
+            # family cannot establish a negative multi-signal observation.
+            if atoms.get('EXPERT_PATHI_MULTI_2PLUS') is False and expert_refs:
+                atoms.pop('EXPERT_PATHI_MULTI_2PLUS')
             alternate_book=None
             if 'Opening_Spread' not in row and any(
                     V55_MINER_OPENING_ROLE_ATOMS.intersection(r['atoms']) for r in market_rules):
@@ -2666,6 +2828,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     **({'opponent_adjusted_ypp_provenance':feature_provenance} if feature_provenance else {}),
                     **({'opening_role_reference_book':alternate_book} if alternate_book and
                         V55_MINER_OPENING_ROLE_ATOMS.intersection(rule['atoms']) else {}),
+                    **({'expert_context_capture_refs':sorted(set(expert_refs.values()))} if expert_refs and
+                        any(a.startswith(('EXPERT_PATHI','EXPERT_BIGAL')) for a in rule['atoms']) else {}),
+                    **({'prediction_tracker_snapshot_ref':pt_ref} if pt_ref and
+                        any(a.startswith(('PTIDX_','META_PT_')) for a in rule['atoms']) else {}),
                     'quote_capture_ref':q.get('quote_capture_ref') or
                         'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(exact[:-1]),
                     'qualification_level':'HISTORICAL_SCREEN_ONLY','capture_id':cid,'bet_authority':0})
@@ -2676,6 +2842,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit.setdefault('rivalry_history',{'status':'NOT_EVALUATED'})['games_with_prior_meetings']=len(rivalry_games)
     audit['recovered_cfbd_matchup_games_by_field']={field:len(gids) for field,gids in recovered_fields.items()}
     audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
+    audit['miner_expert_quote_inputs']['matched_current_spread_games']=len(supported_expert_games)
+    audit.setdefault('miner_pt_live_inputs',{'status':'NOT_EVALUATED'})['games_with_pt_atom_fields']=len(pt_games)
     audit['capture']=capture_audit
     return captured,audit
 
