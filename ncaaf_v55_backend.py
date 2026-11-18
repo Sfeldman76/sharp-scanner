@@ -2482,19 +2482,31 @@ def _v55_miner_expert_quote_fields(events,board_rows,at):
                    'mapped_expert_events_by_family':dict(counts),'mapped_spread_contexts':len(values)}
 
 
+def _v55_pt_iso_date(value):
+    day=s(value)
+    try:
+        parsed=date.fromisoformat(day)
+        return parsed if parsed.isoformat()==day else None
+    except ValueError:
+        return None
+
+
 def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,parse_csv=None):
     """Join the existing live PT feeds on season, Eastern date and ordered schools."""
     prefix='research/ncaaf/external/prediction_tracker/'
     stored=storage_client.bucket(bucket)
+    all_matchups={}
     matchups={}
     for fixture in board_rows:
         gid,_,_,kickoff,_,_=_v55_board_fixture_identity(fixture)
         home,away=(team_key(_v55_live_id(fixture.get(side+'_Team_Norm')) or _v55_live_id(fixture.get(side+'_Team')))
                    for side in ('Home','Away'))
         season=_v55_live_id(fixture.get('Season'))
-        if gid and season and kickoff and at<kickoff and home and away and home!=away:
+        if gid and season and kickoff and home and away and home!=away:
             day=kickoff.astimezone(ZoneInfo('America/New_York')).date().isoformat()
-            matchups[gid]=(season,day,home,away)
+            all_matchups[gid]=(season,day,home,away)
+            if at<kickoff:
+                matchups[gid]=all_matchups[gid]
 
     matches={}
     sources={}
@@ -2504,6 +2516,8 @@ def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,pars
         if file.startswith('raw/') and not callable(parse_csv):
             diag['status']='PINNED_PT_PARSER_UNAVAILABLE'
             continue
+        slate=None
+        slate_evidence=None
         try:
             blob=stored.blob(name)
             blob.reload()
@@ -2515,6 +2529,18 @@ def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,pars
             diag.update(source_ref=ref,observed_at_utc=observed.isoformat())
             payload=stored.blob(name,generation=blob.generation).download_as_bytes()
             if file.startswith('raw/'):
+                metadata=blob.metadata or {}
+                start=_v55_pt_iso_date(metadata.get('pt_slate_start_et'))
+                end=_v55_pt_iso_date(metadata.get('pt_slate_end_et'))
+                tagged_at=clock(blob.updated)
+                diag['slate_status']='NO_VALID_VISIBLE_SLATE_METADATA'
+                if (start and end and 0<=(end-start).days<7 and tagged_at
+                        and observed<=tagged_at<=at and blob.metageneration):
+                    slate=(start.isoformat(),end.isoformat())
+                    slate_evidence={'start_et':slate[0],'end_et':slate[1],
+                                    'metadata_updated_at_utc':tagged_at.isoformat(),
+                                    'object_metageneration':str(blob.metageneration)}
+                    diag.update(slate_status='READ',slate=slate_evidence)
                 records=[]
                 for season in sorted({key[0] for key in matchups.values()}):
                     frame,parsed=parse_csv(payload,int(season),source_context='LIVE_GCS_FIRST')
@@ -2528,7 +2554,10 @@ def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,pars
 
         grouped=defaultdict(list)
         dates=Counter()
-        ordered_pairs=set()
+        undated_rows=defaultdict(list)
+        slate_pair_counts=Counter((sy,h,a) for sy,day,h,a in all_matchups.values()
+                                  if slate and slate[0]<=day<=slate[1])
+        ordered_pairs=Counter()
         undated=archive_rows=0
         for row in records:
             if file=='current.csv' and s(row.get('source_kind')).upper()!='LIVE_CURRENT':
@@ -2538,23 +2567,32 @@ def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,pars
             home,away=(team_key(_v55_live_id(row.get(c))) for c in ('home_key','away_key'))
             if not season or not home or not away or home==away:
                 continue
-            ordered_pairs.add((season,home,away))
+            ordered_pairs[season,home,away]+=1
             day=s(row.get('game_date'))
-            try:
-                if len(day)!=10 or date.fromisoformat(day).isoformat()!=day:
-                    raise ValueError
-            except ValueError:
+            if not _v55_pt_iso_date(day):
                 undated+=1
+                if day.lower() in ('','nan','nat','none','null','<na>'):
+                    undated_rows[season,home,away].append(row)
                 continue
             dates[day]+=1
             grouped[season,day,home,away].append(row)
         diag.update(status='READ',rows=len(records),non_live_rows_skipped=archive_rows,
                     undated_live_rows=undated,source_dates=dict(sorted(dates.items())[-16:]),
-                    matched_games=0,selected_games=0,ambiguous_games=0,
+                    matched_games=0,selected_games=0,ambiguous_games=0,slate_matched_games=0,
                     ordered_pair_matches=sum((sy,h,a) in ordered_pairs for sy,_,h,a in matchups.values()),
                     board_date_matches=sum(day in dates for _,day,_,_ in matchups.values()))
         for gid,key in matchups.items():
             rows=grouped.get(key,())
+            used_slate=None
+            if not rows and slate and slate[0]<=key[1]<=slate[1]:
+                pair=(key[0],key[2],key[3])
+                rows=undated_rows.get(pair,())
+                if rows and (slate_pair_counts[pair]!=1 or ordered_pairs[pair]!=1):
+                    diag['ambiguous_games']+=1
+                    continue
+                if len(rows)==1:
+                    used_slate=slate_evidence
+                    diag['slate_matched_games']+=1
             if len(rows)>1:
                 diag['ambiguous_games']+=1
             if len(rows)!=1:
@@ -2563,11 +2601,11 @@ def _v55_miner_current_pt_rows(storage_client,bucket,board_rows,at,team_key,pars
             # Keep each forecast row intact. Prefer newer visible generations,
             # retaining the dedicated live feed on a timestamp tie.
             if gid not in matches or observed>matches[gid][2]:
-                matches[gid]=(rows[0],ref,observed,file)
-    for _,_,_,file in matches.values():
+                matches[gid]=(rows[0],ref,observed,file,used_slate)
+    for _,_,_,file,_ in matches.values():
         sources[file]['selected_games']+=1
     status='READ' if any(d['status']=='READ' for d in sources.values()) else 'HOLD_PT_LIVE_FORECAST_SOURCE'
-    return {gid:(row,ref) for gid,(row,ref,_,_) in matches.items()},{
+    return {gid:(row,ref,slate) for gid,(row,ref,_,_,slate) in matches.items()},{
         'status':status,'matched_games':len(matches),'eligible_board_games':len(matchups),'sources':sources}
 
 
@@ -2696,6 +2734,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     rivalry_detector=atom_globals.get('_v230_is_rivalry')
     pt_rows={}
     pt_games=set()
+    pt_verified_openers=set()
     pt_weights=atom_globals.get('PT_PUBLISHED_WEIGHTS',{})
     if pairs and callable(pt_key:=atom_globals.get('_pt_team_key')):
         try:
@@ -2871,6 +2910,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             # require a verified site role, which this fixture feed lacks.
             expert_refs={}
             pt_ref=None
+            pt_slate=None
             if mkt=='spreads':
                 for q in sides.values():
                     key=(gid,s(q['book']).lower(),s(q['side']).upper(),num(q['line']),num(q['odds']),
@@ -2880,12 +2920,14 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     row.update(dict.fromkeys(expert_refs,1))
                     supported_expert_games.add(gid)
                 if gid in pt_rows and (opening:=num(row.get('Opening_Spread'))) is not None:
-                    forecast,ref=pt_rows[gid]
+                    pt_verified_openers.add(gid)
+                    forecast,ref,slate=pt_rows[gid]
                     fields=_v55_miner_pt_fields(forecast,opening,pt_weights)
                     if fields:
                         row.update(fields)
                         pt_games.add(gid)
                         pt_ref=ref
+                        pt_slate=slate
             atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                 pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
                 market=mkt,enforce_support_floor=False)}
@@ -2923,7 +2965,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     stats['not_met']+=1
                     rule_stats[rid]['not_met']+=1
                     continue
-                rule_stats[rid]['fired']+=1
+                stats['fired']+=1
                 target=('OVER' if rule['direction']=='PLAY_ON' else 'UNDER') if mkt=='totals' else (
                     'HOME' if rule['direction']=='PLAY_ON' else 'AWAY')
                 q=sides[target]
@@ -2951,7 +2993,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                         V55_MINER_OPENING_ROLE_ATOMS.intersection(rule['atoms']) else {}),
                     **({'expert_context_capture_refs':sorted(set(expert_refs.values()))} if expert_refs and
                         any(a.startswith(('EXPERT_PATHI','EXPERT_BIGAL')) for a in rule['atoms']) else {}),
-                    **({'prediction_tracker_snapshot_ref':pt_ref} if pt_ref and
+                    **({'prediction_tracker_snapshot_ref':pt_ref,
+                        **({'prediction_tracker_slate':pt_slate} if pt_slate else {})} if pt_ref and
                         any(a.startswith(('PTIDX_','META_PT_')) for a in rule['atoms']) else {}),
                     'quote_capture_ref':q.get('quote_capture_ref') or
                         'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(exact[:-1]),
@@ -2964,7 +3007,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit['recovered_cfbd_matchup_games_by_field']={field:len(gids) for field,gids in recovered_fields.items()}
     audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
     audit['miner_expert_quote_inputs']['matched_current_spread_games']=len(supported_expert_games)
-    audit.setdefault('miner_pt_live_inputs',{'status':'NOT_EVALUATED'})['games_with_pt_atom_fields']=len(pt_games)
+    audit.setdefault('miner_pt_live_inputs',{'status':'NOT_EVALUATED'}).update(
+        matched_spread_games=sum(gid in pt_rows for gid,mkt in pairs if mkt=='spreads'),
+        matched_spread_games_with_verified_openers=len(pt_verified_openers),
+        games_with_pt_atom_fields=len(pt_games))
     audit['capture']=capture_audit
     return captured,audit
 
