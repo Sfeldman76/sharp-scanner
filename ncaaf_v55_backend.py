@@ -2179,6 +2179,24 @@ def _v55_capture_miner_box_scores(bq_client, seasons):
             'availability_basis':'BACKEND_WAREHOUSE_OBSERVATION_TIME'}
 
 
+def _v55_miner_prior_underperformance(margin,team,opponent):
+    """Resolve the frozen underperformance condition from provable box-score facts."""
+    if margin>=0:
+        return False
+    wins=0
+    for field in ('yards','ypp','first_downs'):
+        left,right=team.get(field),opponent.get(field)
+        wins+=int(left is not None and right is not None and left>right)
+    own_turnovers,opp_turnovers=team.get('turnovers'),opponent.get('turnovers')
+    turnover_adversity=(own_turnovers is not None and opp_turnovers is not None
+                        and own_turnovers-opp_turnovers>=2)
+    if wins>=2 or turnover_adversity:
+        return True
+    # A nonoffensive touchdown deficit can independently satisfy the rule.
+    # The team box feed does not establish that it was absent.
+    return None
+
+
 def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
     """Build the frozen deep-context YPP fields from observed CFBD box scores."""
     from google.api_core.exceptions import GoogleAPICallError, NotFound
@@ -2245,7 +2263,7 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
                 if isinstance(side,dict):
                     yield _v55_cfbd_school_key(side.get('team')),side
 
-    def pairs_for(key, visible):
+    def pairs_for(key, visible, quality=None):
         _,gid=key
         boxes={}
         for team,side in side_rows(visible.get('team_game',[]),gid):
@@ -2284,9 +2302,17 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
                 plays=advanced.get(team) or num(stats.get('totalplays'))
             if yards is not None and plays is not None and plays>0:
                 ypp[team]=yards/plays
+            if quality is not None:
+                first_downs,turnovers=(num(stats.get(name)) for name in ('firstdowns','turnovers'))
+                quality[team]={
+                    'yards':yards if yards is not None and yards>=0 else None,
+                    'ypp':ypp.get(team) if yards is not None and yards>=0 else None,
+                    'first_downs':first_downs if first_downs is not None and first_downs>=0 else None,
+                    'turnovers':turnovers if turnovers is not None and turnovers>=0 else None,
+                }
         return ypp
 
-    def build_timeline(source):
+    def build_timeline(source, quality_boxes=None):
         timeline={}
         for key,sources in source.items():
             visible={}
@@ -2296,11 +2322,15 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
             for i,(timestamp,feed,payload) in enumerate(updates):
                 visible[feed]=json.loads(payload) if payload is not None else []
                 if i+1==len(updates) or timestamp!=updates[i+1][0]:
-                    history.append((timestamp,pairs_for(key,visible)))
+                    quality={} if quality_boxes is not None and i+1==len(updates) else None
+                    history.append((timestamp,pairs_for(key,visible,quality)))
+                    if quality:
+                        quality_boxes[key]=quality
             timeline[key]=history
         return timeline
 
-    current_timeline=build_timeline(feeds)
+    quality_boxes={}
+    current_timeline=build_timeline(feeds,quality_boxes)
     archived_timeline=build_timeline(history_feeds)
 
     def game_ypp(timeline,season,gid,team,cutoff,*,before_kickoff=False):
@@ -2321,6 +2351,13 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
     for (season,team),games in schedules.items():
         metrics=[game_ypp(current_timeline,season,gid,team,at) for _,gid,_,_ in games]
         fields={}
+        if len(games)==1 or games[-1][0]>games[-2][0]:
+            _,prior_id,pf,pa=games[-1]
+            box=quality_boxes.get((season,prior_id),{})
+            opponent=next((name for name in box if name!=team),None)
+            result=_v55_miner_prior_underperformance(pf-pa,box.get(team,{}),box.get(opponent,{}))
+            if result is not None:
+                fields['RQ_Prev_Result_Underperformance']=int(result)
         for i,name in enumerate(('Off_YPP','Def_YPP_Allowed','Net_YPP')):
             for period,window in (('Season',metrics),('Recent3',metrics[-3:])):
                 values=[row[i] for row in window if row[i] is not None]
@@ -2357,8 +2394,9 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
             fields['CTX_OppAdj_NetYPP_Source']=adjustment_source
             adjustment_sources[adjustment_source]+=1
             baseline_inputs.update(team_inputs)
-        if fields:
+        if any(name.startswith('CTX_') for name in fields):
             fields['Deep_Game_Count_Prior']=len(games)
+        if fields:
             context[season,team]=fields
     return context,{'box_game_count':sum(len(h[-1][1])==2 for h in current_timeline.values()),
                     'box_version_history_status':version_status,
@@ -2736,6 +2774,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     pt_games=set()
     pt_verified_openers=set()
     pt_weights=atom_globals.get('PT_PUBLISHED_WEIGHTS',{})
+    pt_component_coverage=Counter()
+    pt_full_five=0
+    blocker_counts=Counter()
     if pairs and callable(pt_key:=atom_globals.get('_pt_team_key')):
         try:
             pt_rows,audit['miner_pt_live_inputs']=_v55_miner_current_pt_rows(
@@ -2922,7 +2963,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 if gid in pt_rows and (opening:=num(row.get('Opening_Spread'))) is not None:
                     pt_verified_openers.add(gid)
                     forecast,ref,slate=pt_rows[gid]
+                    pt_component_coverage.update(name for name in pt_weights if num(forecast.get(name)) is not None)
                     fields=_v55_miner_pt_fields(forecast,opening,pt_weights)
+                    pt_full_five+=int('_V212_PT_COMPONENT_STD' in fields)
                     if fields:
                         row.update(fields)
                         pt_games.add(gid)
@@ -2931,6 +2974,12 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             atoms={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                 pd.DataFrame([row]).dropna(axis=1,how='all'),for_live=True,
                 market=mkt,enforce_support_floor=False)}
+            if (result:=num(row.get('Team_RQ_Prev_Result_Underperformance'))) is not None:
+                atoms.setdefault('TEAM_OFF_RESULT_UNDERPERFORMANCE',bool(result))
+            if mkt=='spreads':
+                for name in ('META_PT_LOW_DISPERSION_LE3','TEAM_OFF_RESULT_UNDERPERFORMANCE'):
+                    value=atoms.get(name)
+                    blocker_counts[name,'missing' if value is None else 'true' if value else 'false']+=1
             _v55_miner_fill_conference_atoms(atoms,market_atoms)
             # Verified positive firings give a lower bound, so an incomplete
             # family cannot establish a negative multi-signal observation.
@@ -3010,7 +3059,12 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit.setdefault('miner_pt_live_inputs',{'status':'NOT_EVALUATED'}).update(
         matched_spread_games=sum(gid in pt_rows for gid,mkt in pairs if mkt=='spreads'),
         matched_spread_games_with_verified_openers=len(pt_verified_openers),
-        games_with_pt_atom_fields=len(pt_games))
+        games_with_pt_atom_fields=len(pt_games),
+        frozen_five_component_coverage={name:pt_component_coverage[name] for name in pt_weights},
+        frozen_five_complete_games=pt_full_five)
+    audit['pt_spread_blocker_atoms']={
+        name:{state:blocker_counts[name,state] for state in ('true','false','missing')}
+        for name in ('META_PT_LOW_DISPERSION_LE3','TEAM_OFF_RESULT_UNDERPERFORMANCE')}
     audit['capture']=capture_audit
     return captured,audit
 
