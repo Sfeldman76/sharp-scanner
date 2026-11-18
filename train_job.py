@@ -199,6 +199,73 @@ def _v55_live_audit_safe_error(exc):
     return type(exc).__name__ + ': ' + str(exc)[:400]
 
 
+def _v55_live_miner_coverage_contract(library_audit):
+    """Verify that the deployed frozen Miner evaluator emitted REAL game-level coverage.
+
+    This is a read-only audit schema contract, not another atom evaluator.
+    Missing coverage must be a deployment HOLD rather than a silent null.
+    """
+    if not isinstance(library_audit, dict):
+        raise ValueError('MINER_LIBRARY_AUDIT_MISSING')
+    screen=library_audit.get('live_screen_inputs')
+    if not isinstance(screen,dict) or screen.get('schema')!='NCAAF_V55_LIVE_SCREEN_ATOMS_V1':
+        raise ValueError('MINER_LIVE_SCREEN_CONTRACT_MISSING__DEPLOY_CURRENT_BACKEND')
+    games=screen.get('game_markets')
+    if not isinstance(games,dict) or len(games)!=screen.get('game_markets_evaluated'):
+        raise ValueError('MINER_GAME_MARKET_COVERAGE_COUNT_MISMATCH')
+    by_market=library_audit.get('by_market') or {}
+    expected=int(library_audit.get('rule_count') or 0)
+    if expected<1 or screen.get('rules_in_frozen_library')!=expected:
+        raise ValueError('MINER_FROZEN_SYSTEM_LIBRARY_COUNT_MISMATCH')
+    if sum(int((by_market.get(m) or {}).get('rules') or 0) for m in ('spreads','h2h','totals'))!=expected:
+        raise ValueError('MINER_MARKET_RULE_COUNT_MISMATCH')
+    valid_atoms={'TRUE','FALSE','MISSING'}
+    valid_systems={'FIRED','FALSE_CONDITION','MISSING_ATOMS'}
+    per_market={}
+    total_atoms=_v55_audit_Counter()
+    total_systems=_v55_audit_Counter()
+    for m in ('spreads','h2h','totals'):
+        market=by_market.get(m) or {}
+        atom_coverage=market.get('atom_coverage')
+        system_coverage=market.get('system_coverage')
+        if not isinstance(atom_coverage,dict) or not isinstance(system_coverage,dict):
+            raise ValueError('MINER_ATOM_OR_SYSTEM_COVERAGE_MISSING:'+m)
+        if len(system_coverage)!=int(market.get('rules') or 0):
+            raise ValueError('MINER_SYSTEM_COVERAGE_COUNT_MISMATCH:'+m)
+        n=int(market.get('source_games') or 0)
+        for name,counts in atom_coverage.items():
+            if not isinstance(counts,dict) or set(counts)-valid_atoms or sum(counts.values())!=n:
+                raise ValueError('MINER_ATOM_COVERAGE_INVALID:'+m+':'+str(name))
+            total_atoms.update(counts)
+        for name,counts in system_coverage.items():
+            if not isinstance(counts,dict) or set(counts)-valid_systems or sum(counts.values())!=n:
+                raise ValueError('MINER_SYSTEM_COVERAGE_INVALID:'+m+':'+str(name))
+            total_systems.update(counts)
+        per_market[m]={'frozen_systems':len(system_coverage),'unique_frozen_atoms':len(atom_coverage),
+                       'evaluated_game_markets':n}
+    for key,rec in games.items():
+        if not isinstance(rec,dict) or key!=str(rec.get('game_id'))+'|'+str(rec.get('market')):
+            raise ValueError('MINER_GAME_COVERAGE_KEY_INVALID')
+        m=rec['market']
+        if m not in per_market:
+            raise ValueError('MINER_GAME_COVERAGE_MARKET_INVALID')
+        if set((rec.get('atom_values') or {}).values())-valid_atoms or \
+           set((rec.get('system_status') or {}).values())-valid_systems:
+            raise ValueError('MINER_GAME_COVERAGE_STATUS_INVALID')
+        if len(rec.get('system_status') or {})!=per_market[m]['frozen_systems']:
+            raise ValueError('MINER_GAME_SYSTEM_INVENTORY_INCOMPLETE')
+        if len(rec.get('atom_values') or {})!=per_market[m]['unique_frozen_atoms']:
+            raise ValueError('MINER_GAME_ATOM_INVENTORY_INCOMPLETE')
+    if sum(v['evaluated_game_markets'] for v in per_market.values())!=len(games):
+        raise ValueError('MINER_EVALUATED_MARKETS_DONT_RECONCILE')
+    return {'status':'PASS_LIVE_MINER_COVERAGE_CONTRACT',
+            'schema':screen['schema'],'rules':expected,'evaluated_game_markets':len(games),
+            'by_market':per_market,'atom_states':dict(total_atoms),
+            'system_states':dict(total_systems),
+            'all_seven_brains_expected':screen.get('all_seven_brains_expected',[]),
+            'feature_sources_are_observed_not_imputed':True,'bet_authority':0}
+
+
 def _v55_live_qualification_evidence_reconcile(gcs, bucket, backend):
     """Read-only, per-rule qualification/provenance reconciliation.
 
@@ -583,6 +650,13 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
             if library_run is not None:
                 library_signals,library_audit=library_run
                 result['stages']['published_miner_library'].update(library_audit)
+                # The backend's coverage inventory must survive this publisher
+                # handoff. Old deploy images used to pass while silently omitting it.
+                contract=stage('miner_live_screen_contract',lambda:
+                    _v55_live_miner_coverage_contract(library_audit))
+                if contract is not None:
+                    result['miner_live_screen_summary']=contract
+                    result['stages']['miner_live_screen_contract'].update(contract)
                 signals.extend(library_signals)
                 scoring_time=datetime.now(timezone.utc)
         historical_grades=stage('current_pick_historical_grades',lambda:
@@ -662,7 +736,10 @@ def _v55_live_audit_run(*, out, manifest_uri, bucket,
         'prospective_producer_invoked':result['stages'].get('prospective_live_brain_producer',{}).get('producer_executed') is True,
         'original_capture_handoff_missing':not bool(signals),
         'backend_scoring_produced_rows':result['scoring'].get('scored_market_sides',0)>0,
-        'bet_authority_remained_zero':True}
+        'bet_authority_remained_zero':True,
+        'miner_live_screen_coverage_published':(
+            result.get('miner_live_screen_summary',{}).get('status')=='PASS_LIVE_MINER_COVERAGE_CONTRACT')
+            if capture_producer else None}
     result['errors']=errors
     if errors:result['status']='HOLD_AUDIT_STAGE_FAILURE'
     elif result['acceptance_checks']['backend_scoring_produced_rows']:
