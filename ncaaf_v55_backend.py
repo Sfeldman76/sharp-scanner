@@ -2285,6 +2285,11 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
         return None,None,None
 
     context={}
+    eastern=ZoneInfo('America/New_York')
+    game_dates={(season,gid):start.astimezone(eastern).date()
+                for (season,_),games in schedules.items() for start,gid,_,_ in games}
+    baseline_inputs=Counter()
+    adjustment_sources=Counter()
     for (season,team),games in schedules.items():
         metrics=[game_ypp(current_timeline,season,gid,team,at) for _,gid,_,_ in games]
         fields={}
@@ -2294,21 +2299,36 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
                 if values:
                     fields[f'CTX_{period}_{name}']=mean(values)
         adjusted=[]
+        team_inputs=Counter()
         for (kick,gid,_,_),(_,_,net) in zip(games,metrics):
             if net is None:
                 continue
             opponent=next((opp for opp,_ in participants[season,gid] if opp!=team),None)
-            # The mutable table can contain older rows timestamped before the
-            # fetch began. Require an archived post-receipt version for the
-            # opponent's historical baseline.
-            prior_net=[value for start,prior,_,_ in schedules.get((season,opponent),())
-                       if start<kick and
-                       (value:=game_ypp(archived_timeline,season,prior,opponent,kick,
-                                        before_kickoff=True)[2]) is not None]
+            prior_net=[]
+            for start,prior,_,_ in schedules.get((season,opponent),()):
+                if start>=kick or prior==gid:
+                    continue
+                value=game_ypp(archived_timeline,season,prior,opponent,kick,
+                               before_kickoff=True)[2]
+                source='ARCHIVED_PREKICK'
+                if value is None:
+                    # Reconstruct from CFBD-confirmed finals on earlier Eastern
+                    # dates, using box scores visible at this evaluation cutoff.
+                    if game_dates[season,prior]>=game_dates[season,gid]:
+                        continue
+                    value=game_ypp(current_timeline,season,prior,opponent,at)[2]
+                    source='RECONSTRUCTED_PRIOR_FINALS'
+                if value is not None:
+                    prior_net.append(value)
+                    team_inputs[source]+=1
             if prior_net:
                 adjusted.append(net+mean(prior_net))
         if adjusted:
             fields['CTX_OppAdj_NetYPP']=mean(adjusted)
+            adjustment_source=('MIXED' if len(team_inputs)>1 else next(iter(team_inputs)))
+            fields['CTX_OppAdj_NetYPP_Source']=adjustment_source
+            adjustment_sources[adjustment_source]+=1
+            baseline_inputs.update(team_inputs)
         if fields:
             fields['Deep_Game_Count_Prior']=len(games)
             context[season,team]=fields
@@ -2318,6 +2338,8 @@ def _v55_miner_ypp_context(bq_client, seasons, teams, held_teams, at):
                         any(len(values)==2 for _,values in h) for h in archived_timeline.values()),
                     'team_seasons_with_opponent_adjustment':sum(
                         'CTX_OppAdj_NetYPP' in values for values in context.values()),
+                    'team_seasons_by_opponent_adjustment_source':dict(adjustment_sources),
+                    'opponent_baseline_contributions_by_source':dict(baseline_inputs),
                     'team_seasons_with_ypp':len(context)}
 
 
@@ -2358,6 +2380,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     openers={}
     score_fields={}
     ypp_fields={}
+    ypp_provenance={}
     audit['completed_game_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['ypp_inputs']={'status':'NOT_EVALUATED','games_with_fields':0}
     audit['box_score_version_capture']={'status':'NOT_EVALUATED'}
@@ -2400,16 +2423,26 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                             continue
                         ypp_fields[gid]={f'{prefix}_{key}':value
                                          for prefix,team in (('Team',home),('Opp',away))
-                                         for key,value in context.get((season,team),{}).items()}
+                                         for key,value in context.get((season,team),{}).items()
+                                         if key!='CTX_OppAdj_NetYPP_Source'}
+                        ypp_provenance[gid]={
+                            prefix:source for prefix,team in (('Team',home),('Opp',away))
+                            if (source:=context.get((season,team),{}).get('CTX_OppAdj_NetYPP_Source'))
+                        }
                     audit['ypp_inputs']={
                         'status':'PASS' if any(ypp_fields.values()) else 'NO_MATCHED_CFBD_BOX_SCORES',
                         'as_of_utc':at.isoformat(),'availability_basis':'BOX_SCORE_ROW_INGESTED_AT',
-                        'opponent_baseline_availability_basis':'ARCHIVED_OBSERVATION_TIMESTAMP',
+                        'opponent_baseline_availability_basis':'PREFER_PREKICK_ARCHIVE_ELSE_RECONSTRUCT_PRIOR_FINALS',
                         'games_with_fields':sum(bool(fields) for fields in ypp_fields.values()),
                         'games_by_field':dict(Counter(key for fields in ypp_fields.values() for key in fields)),
+                        'live_sides_by_opponent_adjustment_source':{
+                            prefix:dict(Counter(sources[prefix] for sources in ypp_provenance.values()
+                                                if prefix in sources))
+                            for prefix in ('Team','Opp')},
                         **coverage}
                 except Exception as exc:
                     ypp_fields={}
+                    ypp_provenance={}
                     audit['ypp_inputs']={'status':'HOLD_CFBD_BOX_SCORE_INPUTS',
                         'error':type(exc).__name__+':'+str(exc)[:240],'games_with_fields':0}
     if bq_client is not None:
@@ -2477,6 +2510,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 target=('OVER' if rule['direction']=='PLAY_ON' else 'UNDER') if mkt=='totals' else (
                     'HOME' if rule['direction']=='PLAY_ON' else 'AWAY')
                 q=sides[target]
+                feature_provenance={}
+                if any('OPPADJ_NETYPP' in atom or 'WEAK_UNDERLYING' in atom for atom in rule['atoms']):
+                    feature_provenance=ypp_provenance.get(gid,{})
                 exact=(gid,mkt,target,q['book'],q['line'],q['odds'],q['quote_observed_at_utc'],
                        q['kickoff_utc'],rule['rule_id'])
                 cid=sha((V55_LIBRARY_MINER_PRODUCER,digest,exact))
@@ -2493,6 +2529,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'rule_registry_sha256':digest,'signal_observed_at_utc':at.isoformat(),
                     'direction_verified':True,'original_event_created_prospectively':True,
                     'prospective_evaluation_after_quote':True,'producer':V55_LIBRARY_MINER_PRODUCER,
+                    **({'opponent_adjusted_ypp_provenance':feature_provenance} if feature_provenance else {}),
                     'quote_capture_ref':q.get('quote_capture_ref') or
                         'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(exact[:-1]),
                     'qualification_level':'HISTORICAL_SCREEN_ONLY','capture_id':cid,'bet_authority':0})
