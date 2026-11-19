@@ -3536,6 +3536,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             if returning is not None:
                 row.setdefault('CFBD_Returning_Pct_Receive_PPA',returning)
             row.update(score_fields.get(gid,{}))
+            row.update(ypp_fields.get(gid,{}))
             prior_market=prior_market_fields.get(gid,{})
             row.update(prior_market)
             if 'Prev_Open_Spread' in prior_market:
