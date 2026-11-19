@@ -50,6 +50,8 @@ V55_MINER_ADDITIONAL_PRIORS=frozenset((
     'CFBD_Portal_In_4StarPlus','CFBD_Portal_Out_4StarPlus',
     'CFBD_Portal_Net_Rating','CFBD_Portal_Net_Prior_TotalPPA','CFBD_Portal_Net_Prior_Usage',
     'CFBD_Portal_Net_PriorPPA_Pct','CFBD_Prior_PPA_Return_Pct','CFBD_Prior_Usage_Return_Pct',
+    'CFBD_Returning_Pct_PPA','CFBD_Returning_Pct_Pass_PPA',
+    'CFBD_Returning_Pct_Rush_PPA','CFBD_Returning_Pct_Receive_PPA',
     'CFBD_QB_Game_PPA_SeasonPrior','CFBD_Opp_QB_Game_PPA_SeasonPrior',
     'CFBD_QB_Game_Pass_Success_SeasonPrior','CFBD_Opp_QB_Game_Pass_Success_SeasonPrior',
 ))
@@ -67,6 +69,10 @@ V55_MINER_EXACT_TEAM_ATOMS={
     'TEAM_CLEMSON_TIGERS':'clemson',
     'TEAM_ARKANSAS_RAZORBACKS':'arkansas',
 }
+V55_MINER_TEAM_MASCOT_KEYS={
+    'alabamacrimsontide':'alabama','ohiostatebuckeyes':'ohiostate',
+    'clemsontigers':'clemson','arkansasrazorbacks':'arkansas',
+}
 
 def _v55_miner_live_excluded_atom(name):
     return any(str(name).startswith(prefix) for prefix in V55_MINER_LIVE_EXCLUDED_PREFIXES)
@@ -77,6 +83,7 @@ def _v55_miner_verified_team_atoms(market_atoms, home):
     # Require a canonical key, not a token-prefix or invented alias.
     if not school:
         return {}
+    school=V55_MINER_TEAM_MASCOT_KEYS.get(school,school)
     return {atom:(school==target) for atom,target in V55_MINER_EXACT_TEAM_ATOMS.items()
             if atom in market_atoms}
 
@@ -2122,76 +2129,134 @@ def _v55_miner_score_history(rows, at):
     return teams,held_teams,dict(counts)
 
 
-def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at):
-    """Historical *completed* games with recorded opening lines, not live quotes.
-
-    Prior season-context features are reconstructed from same-team, same-season
-    historical rows only. Dates must precede the upcoming fixture date strictly;
-    ties, conflicting identities/results and missing openers remain unavailable.
-    Historical records are not represented as original prospectively captured
-    model decisions, and cannot grant betting authority.
-    """
+def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, held_teams):
+    """Attach recorded openers to consecutive prior CFBD finals for live screening."""
     from google.cloud import bigquery
-    if not seasons or not fixtures:
-        return {}, {'status':'NO_FIXTURES'}
+    if not seasons or not fixtures or not teams:
+        return {}, {'status':'NO_CFBD_PRIOR_GAME_HISTORY'}
+    eastern=ZoneInfo('America/New_York')
     config=bigquery.QueryJobConfig(query_parameters=[
         bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
-        bigquery.ScalarQueryParameter('at','DATE',at.date()),
+        bigquery.ScalarQueryParameter('latest_date','DATE',at.date()),
     ])
-    sql="""SELECT Season, Game_Key, Game_Date, Is_Home, Team_Norm,
-                  Opponent_Norm, Opening_Spread, Team_Score, Opponent_Score
-           FROM `sharplogger.sharp_data.ncaaf_historical_game_side_context`
-           WHERE Season IN UNNEST(@seasons) AND Game_Date < @at
+    table='sharplogger.sharp_data.ncaaf_historical_game_side_context'
+    schema={column.name for column in bq_client.get_table(table).schema}
+    ml_dog='SAFE_CAST(Is_ML_Dog AS FLOAT64)' if 'Is_ML_Dog' in schema else 'CAST(NULL AS FLOAT64)'
+    sql=f"""SELECT Season, Game_Key, Source_Game_ID, Game_Date, Team_Norm,
+                  Canonical_Team_Norm, Is_Home, Opponent_Norm, Opponent_Canonical_Team_Norm,
+                  Opening_Spread, Team_Score, Opponent_Score, {ml_dog} AS Observed_ML_Dog
+           FROM `{table}`
+           WHERE Season IN UNNEST(@seasons) AND Game_Date <= @latest_date
              AND Game_Key IS NOT NULL AND Team_Score IS NOT NULL
-             AND Opponent_Score IS NOT NULL AND Opening_Spread IS NOT NULL"""
-    history=defaultdict(lambda:defaultdict(set))
-    for rec in bq_client.query(sql,job_config=config).result():
-        year=num(rec['Season'])
-        when=rec['Game_Date']
-        team=_v55_cfbd_school_key(rec['Team_Norm'])
-        other=_v55_cfbd_school_key(rec['Opponent_Norm'])
-        line=num(rec['Opening_Spread'])
-        scored=num(rec['Team_Score']);allowed=num(rec['Opponent_Score'])
-        if (year is None or when is None or not team or not other or team==other or
-                line is None or abs(line)>100 or scored is None or allowed is None or
-                scored<0 or allowed<0 or scored!=int(scored) or allowed!=int(allowed)):
+             AND Opponent_Score IS NOT NULL"""
+    by_id=defaultdict(set)
+    by_pair=defaultdict(set)
+    status=Counter()
+    for row in bq_client.query(sql,job_config=config).result():
+        status['historical_rows_read']+=1
+        season=row['Season']
+        date=row['Game_Date']
+        points=num(row['Team_Score'])
+        conceded=num(row['Opponent_Score'])
+        if points is None or conceded is None or min(points,conceded)<0:
             continue
-        history[int(year),team][when].add((str(rec['Game_Key']),other,line,scored,allowed))
-    result={};status=Counter()
+        raw_line=num(row['Opening_Spread'])
+        line=raw_line if raw_line is not None and abs(raw_line)<=100 else None
+        side=(str(row['Game_Key']),line,num(row['Is_Home']),num(row['Observed_ML_Dog']))
+        score_date=(season,date,points,conceded)
+        ids={_v55_live_id(row[key]) for key in ('Source_Game_ID','Game_Key')}-{''}
+        if points!=conceded:
+            for game_id in ids:
+                by_id[(*score_date,game_id)].add(side)
+        home_keys={_v55_cfbd_school_key(row[k]) for k in ('Team_Norm','Canonical_Team_Norm')}-{''}
+        opp_keys={_v55_cfbd_school_key(row[k]) for k in ('Opponent_Norm','Opponent_Canonical_Team_Norm')}-{''}
+        for team in home_keys:
+            for opponent in opp_keys-{team}:
+                by_pair[(*score_date,team,opponent)].add(side)
+
+    # CFBD supplies game order and the opponent on the completed fixture.
+    # Sportsbook rows only supply the recorded line for that exact game side.
+    game_teams=defaultdict(set)
+    for (season,team),games in teams.items():
+        for _,game_id,_,_ in games:
+            game_teams[season,game_id].add(team)
+
+    result={}
     for gid,fixture in fixtures.items():
-        _,home,away,kick,_,_=_v55_board_fixture_identity(fixture)
-        year=num(fixture.get('Season'))
-        if not kick or not home or not away or year is None or year!=int(year):
+        _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
+        season=num(fixture.get('Season'))
+        if not kickoff or at>=kickoff or not home or not away or season not in seasons:
+            status['fixtures_without_verified_score_history']+=1
             continue
-        # Date-only historical rows cannot safely establish same-day chronology.
-        cutoff=kick.date()
-        candidates=[(d,next(iter(v))) for d,v in history.get((int(year),home),{}).items()
-                    if d<cutoff and len(v)==1]
-        candidates.sort(reverse=True,key=lambda x:x[0])
-        if not candidates:
-            status['no_unique_prior_priced_game']+=1
-            continue
-        latest_date,(_,last_opponent,last_line,points,conceded)=candidates[0]
-        state={'Prior_Market_Opening_Spread':last_line,
-               'Prior_Market_Game_Date':latest_date.isoformat(),
-               'Prior_Market_Opponent':last_opponent}
-        # This atom is strictly the last completed game's HOME-team opening
-        # favorite status. Do not extrapolate from current odds or final score.
-        state['_PRIOR_FAVORITE_ATOM']=last_line<0
-        if len(candidates)>=2:
-            second=candidates[1][1]
-            for item in (candidates[0][1],second):
-                if abs(item[2])>100:break
-            else:
-                margin1=points-conceded+last_line
-                margin2=second[3]-second[4]+second[2]
-                state['_ATS_WIN_STREAK_2_ATOM']=(margin1>0 and margin2>0)
-        result[gid]=state
-        status['games_with_prior_priced_game']+=1
-        status['games_with_two_prior_priced_games']+=int('_ATS_WIN_STREAK_2_ATOM' in state)
+        state={}
+        for team,prefix in ((home,''),(away,'Opp_')):
+            if (season,team) in held_teams:
+                continue
+            prior=sorted((g for g in teams.get((season,team),()) if g[0]<at),reverse=True)[:11]
+            if not prior or (len(prior)>1 and prior[0][0]==prior[1][0]):
+                status['sides_without_unique_latest_game']+=1
+                continue
+            lines=[]
+            dogs=[]
+            prior_home=None
+            for index,(played,game_id,points,conceded) in enumerate(prior[:10]):
+                if index+1<len(prior) and played==prior[index+1][0]:
+                    break
+                id_matches=set()
+                pair_matches=set()
+                for day in {played.date(),played.astimezone(eastern).date()}:
+                    score_date=(season,day,points,conceded)
+                    id_matches.update(by_id.get((*score_date,game_id),()))
+                    for opponent in game_teams[season,game_id]-{team}:
+                        pair_matches.update(by_pair.get((*score_date,team,opponent),()))
+                ambiguous_pair=not id_matches and len({key for key,_,_,_ in pair_matches})>1
+                candidates=id_matches or pair_matches
+                priced={line for _,line,_,_ in candidates if line is not None}
+                observed_roles={dog for _,_,_,dog in candidates if dog in (0,1)}
+                dogs.append(next(iter(observed_roles)) if len(observed_roles)==1 and not ambiguous_pair else None)
+                if index==0 and not ambiguous_pair:
+                    roles={role for _,_,role,_ in candidates if role in (0,1)}
+                    if len(roles)==1:
+                        prior_home=next(iter(roles))
+                if len(priced)==1 and not ambiguous_pair:
+                    lines.append(next(iter(priced)))
+                    if index<2:
+                        status['prior_games_matched_by_id' if id_matches else 'prior_games_matched_by_pair']+=1
+                else:
+                    lines.append(None)
+                    if index<2:
+                        status['prior_games_with_ambiguous_pair' if ambiguous_pair else
+                               'prior_games_with_conflicting_openers' if priced else
+                               'prior_games_without_verified_opener']+=1
+            if prior_home is not None:
+                state[prefix+'Prev_Is_Home']=prior_home
+            if dogs and len(dogs)==min(10,len(prior)) and all(v is not None for v in dogs):
+                state[prefix+'Pathi_FB_Dog_Rate_Last10_Prior']=sum(dogs)/len(dogs)
+                status['sides_with_pathi_moneyline_role_history']+=1
+            if not lines or lines[0] is None:
+                status['sides_without_latest_opener']+=1
+                continue
+            line=lines[0]
+            # Match the original Miner live role-context builder's
+            # convention for reconstructing prior favorite/dog from the opener.
+            state.update({prefix+'Prev_Is_ML_Favorite':int(line<0),
+                          prefix+'Prev_Is_ML_Dog':int(line>0),
+                          prefix+'Prev_Open_Spread':line})
+            if prefix:
+                continue
+            state['Prior_Market_Opening_Spread']=line
+            state['Prior_Market_Game_Date']=prior[0][0].date().isoformat()
+            status['games_with_prior_priced_game']+=1
+            if len(lines)>=2 and lines[1] is not None:
+                last_won=prior[0][2]-prior[0][3]+line>0
+                second_won=prior[1][2]-prior[1][3]+lines[1]>0
+                state['ATS_Win_Streak_Prior']=int(last_won)+int(last_won and second_won)
+                status['games_with_two_prior_priced_games']+=1
+        if state:
+            result[gid]=state
     return result, {'status':'READ' if result else 'NO_VERIFIED_PRIOR_MARKET_ROWS',
                     'source':'ncaaf_historical_game_side_context',
-                    'chronology':'STRICTLY_PRIOR_GAME_DATE_AND_RECORDED_OPEN',
+                    'chronology':'CONSECUTIVE_CFBD_FINALS_AND_MATCHED_RECORDED_OPEN',
                     **dict(status)}
 
 
@@ -2546,20 +2611,24 @@ def _v55_miner_rivalry_fields(meetings,fixture,canonical_id,kickoff,at):
     if not canonical_id or not home or not away:
         return {}
     cutoff=min(kickoff,at)
-    prior=[(date,exact,scores) for (_,gid),(date,exact,scores) in
+    prior=[(date,exact,scores,season) for (season,gid),(date,exact,scores) in
            meetings.get(frozenset((home,away)),{}).items()
            if gid!=canonical_id and (date if exact else date+timedelta(days=1))<cutoff]
     if not prior:
         return {}
     prior.sort(key=lambda item:item[0],reverse=True)
-    last,exact,_=prior[0]
+    last,exact,_,last_season=prior[0]
     days=(kickoff-last).total_seconds()/86400
     fields={'H2H2_Prior_Meetings':len(prior)}
     # A date-only record cannot resolve this cutoff when the day spans it.
     if exact or not 450<days<451:
         fields['Days_Since_Last_Matchup']=days
-    if len({date for date,_,_ in prior})==len(prior):
-        margins=[scores[home]-scores[away] for _,_,scores in prior]
+    if len({date for date,_,_,_ in prior})==len(prior):
+        margins=[scores[home]-scores[away] for _,_,scores,_ in prior]
+        season=num(fixture.get('Season'))
+        if season is not None:
+            fields['Opp_Revenge_Flag_CurrentOrPriorSeason']=int(
+                last_season in (season,season-1) and margins[0]>0)
         fields.update(Last_Matchup_Margin=margins[0],Opp_Last_Matchup_Margin=-margins[0],
                       Revenge_Flag=int(margins[0]<0),Opp_Revenge_Flag=int(margins[0]>0),
                       Revenge_Depth=next((i for i,m in enumerate(margins) if m>=0),len(margins)),
@@ -2567,8 +2636,112 @@ def _v55_miner_rivalry_fields(meetings,fixture,canonical_id,kickoff,at):
     return fields
 
 
+def _v55_miner_travel_inputs(bq_client, fixtures, features, seasons, at, provider):
+    from google.cloud import bigquery
+
+    table=provider.get('NCAAF_TRAVEL_REFERENCE_TABLE','sharplogger.sharp_data.ncaaf_game_travel_reference')
+    import re
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*',table):
+        raise ValueError('INVALID_TRAVEL_REFERENCE_TABLE')
+    fields={
+        'Team_Travel_Miles':'Home_Travel_Miles','Opp_Travel_Miles':'Away_Travel_Miles',
+        'Team_Time_Zones_Crossed':'Home_Time_Zones_Crossed','Opp_Time_Zones_Crossed':'Away_Time_Zones_Crossed',
+        'Team_Travel_Eastward':'Home_Travel_Eastward','Opp_Travel_Eastward':'Away_Travel_Eastward',
+        'Team_Travel_Westward':'Home_Travel_Westward','Opp_Travel_Westward':'Away_Travel_Westward',
+        'Neutral_Site':'Neutral_Site','Travel_Destination_Resolved':'Destination_Resolved',
+    }
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ScalarQueryParameter('earliest','DATE',(at-timedelta(days=2)).date()),
+        bigquery.ScalarQueryParameter('latest','DATE',(at+timedelta(days=45)).date()),
+    ])
+    rows=bq_client.query(f"""SELECT Season, Game_ID, Game_Date, Home_School, Away_School,
+                         Home_Team_Norm, Away_Team_Norm, Home_Alias_Tokens, Away_Alias_Tokens,
+                         {','.join(fields.values())}
+                  FROM `{table}` WHERE Season IN UNNEST(@seasons)
+                  AND SAFE_CAST(Game_Date AS DATE) BETWEEN @earliest AND @latest""",job_config=config).result()
+    by_id=defaultdict(list)
+    by_pair=defaultdict(list)
+    eastern=ZoneInfo('America/New_York')
+    counts=Counter()
+    for row in rows:
+        counts['reference_rows']+=1
+        game_id=_v55_live_id(row['Game_ID'])
+        day=s(row['Game_Date'])[:10]
+        home={_v55_cfbd_school_key(v) for v in (
+            row['Home_School'],row['Home_Team_Norm'],*s(row['Home_Alias_Tokens']).split('|'))}-{''}
+        away={_v55_cfbd_school_key(v) for v in (
+            row['Away_School'],row['Away_Team_Norm'],*s(row['Away_Alias_Tokens']).split('|'))}-{''}
+        values=tuple(num(row[name]) for name in fields.values())
+        entry=(game_id,day,home,away,values)
+        if game_id:
+            by_id[row['Season'],game_id].append(entry)
+        for h in home:
+            for a in away-{h}:
+                by_pair[row['Season'],day,h,a].append(entry)
+    result={}
+    for gid,fixture in fixtures.items():
+        _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
+        if not kickoff or kickoff<=at or not home or not away:
+            continue
+        season=num(fixture.get('Season'))
+        cfbd=features.get(gid,{})
+        game_id=_v55_live_id(cfbd.get('cfbd_game_id') or fixture.get('CFBD_Game_ID'))
+        starts=(kickoff,clock(cfbd.get('cfbd_game_date_utc')))
+        days={day.isoformat() for t in starts if t for day in (t.date(),t.astimezone(eastern).date())}
+        exact=by_id.get((season,game_id),())
+        choices=exact or [r for day in days for r in by_pair.get((season,day,home,away),())]
+        valid={(g,values) for g,day,h,a,values in choices if day in days and home in h and away in a}
+        if len(valid)!=1:
+            counts['ambiguous_or_unmatched']+=1
+            continue
+        _,values=next(iter(valid))
+        matched={k:v for k,v in zip(fields,values) if v is not None}
+        if matched.get('Travel_Destination_Resolved')!=1:
+            matched={k:v for k,v in matched.items() if k in ('Neutral_Site','Travel_Destination_Resolved')}
+        result[gid]=matched
+        counts['games_matched_by_id' if exact else 'games_matched_by_pair']+=1
+    return result,{'status':'READ' if result else 'NO_VERIFIED_TRAVEL_REFERENCE_MATCHES',
+                   'source':table,'games_by_field':dict(Counter(k for r in result.values() for k in r)),
+                   **dict(counts)}
+
+
+def _v55_miner_returning_inputs(bq_client,seasons,at):
+    """Recover same-season preseason returning production by exact school."""
+    from google.cloud import bigquery
+
+    table='sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1'
+    field='CFBD_Returning_Pct_Receive_PPA'
+    schema={f.name for f in bq_client.get_table(table).schema}
+    if field not in schema:
+        return {},{'status':'RETURNING_RECEIVE_FIELD_UNAVAILABLE','source':table}
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ScalarQueryParameter('as_of','TIMESTAMP',at),
+    ])
+    rows=bq_client.query(f"""SELECT Season, Team_Key, `{field}` AS value
+                  FROM `{table}` WHERE Season IN UNNEST(@seasons)
+                  AND Game_Date < @as_of AND `{field}` IS NOT NULL
+                  GROUP BY 1,2,3""",job_config=config).result()
+    seen=defaultdict(set)
+    for r in rows:
+        team=_v55_cfbd_school_key(r['Team_Key'])
+        value=num(r['value'])
+        if team and value is not None and 0<=value<=1:
+            seen[r['Season'],team].add(value)
+    values={k:next(iter(v)) for k,v in seen.items() if len(v)==1}
+    return values,{'status':'READ' if values else 'NO_UNAMBIGUOUS_SEASON_VALUES',
+                   'source':table,'team_seasons':len(values),'conflicting_team_seasons':len(seen)-len(values)}
+
+
 def _v55_miner_fill_matchup_fields(row,team,opponent):
     recovered=[]
+    for raw in ('CFBD_QB_Game_PPA_SeasonPrior','CFBD_QB_Game_Pass_Success_SeasonPrior'):
+        other='CFBD_Opp_'+raw.removeprefix('CFBD_')
+        for dst,alternate in ((raw,opponent.get(other)),(other,opponent.get(raw))):
+            if dst not in row and (value:=num(alternate)) is not None:
+                row[dst]=value
+                recovered.append(dst)
     for field,component in V55_MINER_MATCHUP_COMPONENTS.items():
         if field in row:
             continue
@@ -2760,29 +2933,47 @@ def _v55_miner_schedule_classifications(bq_client,seasons,at):
                JSON_VALUE(Payload_JSON,'$.homeTeam') AS home,
                JSON_VALUE(Payload_JSON,'$.awayTeam') AS away,
                JSON_VALUE(Payload_JSON,'$.awayClassification') AS away_classification,
+               SAFE_CAST(JSON_VALUE(Payload_JSON,'$.neutralSite') AS BOOL) AS neutral_site,
+               LOWER(JSON_VALUE(Payload_JSON,'$.seasonType')) AS season_type,
+               SAFE_CAST(JSON_VALUE(Payload_JSON,'$.conferenceGame') AS BOOL) AS conference_game,
                Retrieved_At AS observed
         FROM `sharplogger.sharp_data.ncaaf_cfbd_api_archive`
         WHERE Season IN UNNEST(@seasons) AND Endpoint = '/games' AND Retrieved_At <= @cutoff
     ''',job_config=config).result()
 
 
-def _v55_miner_schedule_subdivisions(rows,fixtures,features,at):
-    by_match=defaultdict(set)
+def _v55_miner_schedule_context(rows,fixtures,features,at):
+    by_match=defaultdict(lambda:defaultdict(set))
     for row in rows:
         game_id=_v55_live_id(row['game_id'])
         kickoff,observed=clock(row['kickoff']),clock(row['observed'])
         home,away=(_v55_cfbd_school_key(row[name]) for name in ('home','away'))
+        if not (game_id and home and away and home!=away and kickoff and observed and observed<=at):
+            continue
+        context=by_match[row['season'],game_id,kickoff,home,away]
         cls=s(row['away_classification']).upper()
-        if (game_id and home and away and home!=away and kickoff and observed
-                and observed<=at<kickoff and cls in ('FBS','FCS','II','II/III','III')):
-            by_match[row['season'],game_id,kickoff,home,away].add(cls)
+        if cls in ('FBS','FCS','II','II/III','III'):
+            context['Opponent_Subdivision'].add(cls)
+        if isinstance(row['neutral_site'],bool):
+            context['Neutral_Site'].add(int(row['neutral_site']))
+        if isinstance(row['conference_game'],bool):
+            context['Is_Conference_Game'].add(int(row['conference_game']))
+        if row['season_type'] in ('regular','postseason'):
+            context['Is_Regular_Season'].add(int(row['season_type']=='regular'))
     found={}
     for gid,fixture in fixtures.items():
         _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
-        canonical_id=_v55_live_id(features.get(gid,{}).get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
-        choices=by_match.get((num(fixture.get('Season')),canonical_id,kickoff,home,away),())
-        if len(choices)==1:
-            found[gid]=next(iter(choices))
+        source=features.get(gid,{})
+        canonical_id=_v55_live_id(source.get('cfbd_game_id') or fixture.get('CFBD_Game_ID'))
+        if not kickoff or not at<kickoff or not canonical_id:
+            continue
+        original=clock(source.get('cfbd_game_date_utc'))
+        choices=defaultdict(set)
+        for start in {kickoff,original}-{None}:
+            for name,values in by_match.get((num(fixture.get('Season')),canonical_id,start,home,away),{}).items():
+                choices[name].update(values)
+        if choices:
+            found[gid]={field:next(iter(values)) for field,values in choices.items() if len(values)==1}
     return found
 
 
@@ -2981,6 +3172,112 @@ def _v55_miner_pt_fields(pt,opening,weights):
     return out
 
 
+def _v55_miner_pathi_inputs(row, generator):
+    import pandas as pd
+
+    current=num(row.get('Current_Spread'))
+    opening=num(row.get('Opening_Spread'))
+    if current is None:
+        return {}
+    base={'Sport':'NCAAF','Market':'spreads',
+          'Current_Total':row.get('Current_Total'),'Opening_Total':row.get('Opening_Total')}
+    rows=generator(pd.DataFrame([{**base,'Value':current,'Opening_Spread':opening},
+                                {**base,'Value':-current,'Opening_Spread':None if opening is None else -opening}]))
+    result={}
+    for index,side in enumerate(rows.to_dict('records')):
+        road=index==1
+        if road and num(row.get('Neutral_Site'))!=0:
+            continue
+        suffix='__ROAD_SIDE' if road else ''
+        for name,value in side.items():
+            if not name.startswith(('Pathi_FB_Dog_','Pathi_FB_Favorite_','Pathi_FB_Crossed_Key_','Pathi_FB_Moved_')):
+                continue
+            if name.endswith('_DataReady') or num(value) not in (0,1):
+                continue
+            if ('Moved_' in name or 'Crossed_Key_' in name) and opening is None:
+                continue
+            if name=='Pathi_FB_Dog_TotalSpread_Gap_LE10' and num(side.get(name+'_DataReady'))!=1:
+                continue
+            result[name+suffix]=int(value)
+        rate=num(row.get(('Opp_' if road else '')+'Pathi_FB_Dog_Rate_Last10_Prior'))
+        line=-current if road else current
+        if rate is not None:
+            result['Pathi_FB_Usually_Dog_Now_Favorite'+suffix]=int(rate>=.70 and line<0)
+            result['Pathi_FB_Usually_Favorite_Now_Dog'+suffix]=int(rate<=.30 and line>0)
+    return result
+
+
+def _v55_miner_bigal_inputs(row):
+    """Apply the frozen home-side gates when their input state is known."""
+    result={}
+    games=num(row.get('Team_Game_Number_Prior'))
+    home=num(row.get('Is_Home'))
+    points=num(row.get('Prev_Points_For'))
+    margin=num(row.get('Pregame_Prev_SU_Margin'))
+    conference=num(row.get('Is_Conference_Game'))
+    recent_revenge=num(row.get('Opp_Revenge_Flag_CurrentOrPriorSeason'))
+    checks=((games,1),(home,1),(conference,0),(recent_revenge,0))
+    if (any(value is not None and value!=required for value,required in checks)
+            or (points is not None and points<=42) or (margin is not None and margin<=0)):
+        result['BigAl_CF1_Week2Home42Win']=0
+    elif all(value is not None for value,_ in checks) and points is not None and margin is not None:
+        result['BigAl_CF1_Week2Home42Win']=1
+
+    regular=num(row.get('Is_Regular_Season'))
+    current=num(row.get('Current_Spread'))
+    revenge=num(row.get('Revenge_Flag'))
+    cf2=((regular,lambda n:n==1),(games,lambda n:n>=8),
+         (revenge,lambda n:n==1),(points,lambda n:n>50),(current,lambda n:n>0))
+    if any(value is not None and not passes(value) for value,passes in cf2):
+        result['BigAl_CF2_LateSeasonRevengeDog']=0
+    elif all(value is not None for value,_ in cf2):
+        result['BigAl_CF2_LateSeasonRevengeDog']=1
+
+    # CF3 needs the recorded prior spread used for the expert rule.
+    # A prior win already proves that there was no upset loss.
+    opp_margin=num(row.get('Opp_Pregame_Prev_SU_Margin'))
+    if regular==0 or (opp_margin is not None and opp_margin>=0):
+        result['BigAl_CF3_Fade19PlusFavoriteUpsetLoss']=0
+    return result
+
+
+def _v55_miner_missing_input_reason(atom,row,pathi_ready,bigal_ready):
+    """Describe what a remaining missing atom still depends on."""
+    if atom=='META_PT_LOW_DISPERSION_LE3':
+        return 'FROZEN_FIVE_FORECASTS_INCOMPLETE'
+    if atom.startswith(('META_PT_','PTIDX_','PT_')):
+        return ('RECORDED_CURRENT_MATCHUP_SPREAD_OPENER_REQUIRED' if num(row.get('Opening_Spread')) is None
+                else 'MATCHED_PT_FORECAST_OR_COMPONENT_UNAVAILABLE')
+    if atom.startswith(('CORE_OOF_','SPEC_')):
+        return 'MATCHING_FROZEN_MODEL_OUTPUT_UNAVAILABLE'
+    if 'TRAVEL' in atom or 'CROSSES_' in atom:
+        return 'MATCHED_TRAVEL_REFERENCE_FIELD_UNAVAILABLE'
+    if 'RETURNING' in atom:
+        return 'SAME_SEASON_RETURNING_PRODUCTION_UNAVAILABLE'
+    if atom.startswith('CFBD_QB_'):
+        return 'POINT_IN_TIME_QB_PRIOR_OR_GAME_COUNT_UNAVAILABLE'
+    if atom.startswith('EXPERT_PATHI_') or atom in ('ROLE_FLIP_DOG_TO_FAV_HISTORY','ROLE_FLIP_FAV_TO_DOG_HISTORY'):
+        if not pathi_ready:
+            return 'PATHI_FEATURE_BUILDER_UNAVAILABLE'
+        if atom.endswith('_ROAD_SIDE') and num(row.get('Neutral_Site'))!=0:
+            return 'TRUE_ROAD_SITE_NOT_VERIFIED'
+        if 'CROSSED_KEY' in atom and num(row.get('Opening_Spread')) is None:
+            return 'SAME_BOOK_RECORDED_OPENER_UNAVAILABLE'
+        if 'USUALLY_' in atom or atom.endswith('_HISTORY'):
+            return 'PRIOR_MONEYLINE_ROLE_HISTORY_INCOMPLETE'
+        return 'PATHI_RULE_INPUT_OR_COMPLETE_FAMILY_EVIDENCE_UNAVAILABLE'
+    if atom.startswith('EXPERT_BIGAL_'):
+        return ('BIG_AL_FAMILY_EVALUATION_INCOMPLETE' if bigal_ready
+                else 'BIG_AL_SITE_SCORE_OR_MATCHUP_CONTEXT_INCOMPLETE')
+    if atom=='PRIOR_FAVORITE' or atom.startswith(('ATS_WIN_STREAK','ROLE_FLIP_','OPP_BOUNCEBACK_','BOUNCEBACK_')):
+        return 'PRIOR_MARKET_OR_CURRENT_SITE_AND_OPENER_CONTEXT_INCOMPLETE'
+    if atom=='VS_FCS':
+        return 'VERIFIED_OPPONENT_CLASSIFICATION_UNAVAILABLE'
+    if 'IMPLIED_' in atom or 'TOTAL' in atom:
+        return 'VERIFIED_MARKET_LINE_INPUT_UNAVAILABLE'
+    return 'FROZEN_PROVIDER_INPUT_UNAVAILABLE'
+
+
 def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
                                  bq_client=None, horizon_days=7, now=None):
     """Evaluate the published full-history library with its pinned atom provider."""
@@ -3018,7 +3315,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     # engine: every status comes from the pinned frozen atom provider below.
     # Keep NOT_EVALUATED distinct from a legitimate evaluated FALSE.
     screen_games={}
-    screen_atom_coverage=defaultdict(lambda:Counter())
+    screen_atom_coverage=defaultdict(Counter)
+    missing_input_reasons=defaultdict(Counter)
     screen_system_coverage=defaultdict(lambda:Counter())
     prepared=[]
     live_events=list(prior)
@@ -3057,8 +3355,11 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     score_fields={}
     ypp_fields={}
     ypp_provenance={}
-    subdivisions={}
+    schedule_context={}
+    travel_fields={}
+    returning_fields={}
     teams={}
+    held_teams=set()
     prior_meetings={}
     rivalry_games=set()
     recovered_fields=defaultdict(set)
@@ -3074,11 +3375,22 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         if seasons:
             try:
                 rows=_v55_miner_schedule_classifications(bq_client,seasons,at)
-                subdivisions=_v55_miner_schedule_subdivisions(rows,relevant,features,at)
-                audit['cfbd_schedule_classifications']={'status':'READ','matched_games':len(subdivisions)}
+                schedule_context=_v55_miner_schedule_context(rows,relevant,features,at)
+                audit['cfbd_schedule_classifications']={'status':'READ',
+                    'matched_games':sum('Opponent_Subdivision' in r for r in schedule_context.values()),
+                    'games_with_neutral_site_status':sum('Neutral_Site' in r for r in schedule_context.values())}
             except Exception as exc:
                 audit['cfbd_schedule_classifications']={'status':'HOLD_CFBD_SCHEDULE',
                     'error':type(exc).__name__+':'+str(exc)[:240]}
+            try:
+                travel_fields,audit['travel_inputs']=_v55_miner_travel_inputs(
+                    bq_client,relevant,features,seasons,at,atom_globals)
+            except Exception as exc:
+                audit['travel_inputs']={'status':'HOLD_TRAVEL_REFERENCE','error':type(exc).__name__+':'+str(exc)[:240]}
+            try:
+                returning_fields,audit['returning_inputs']=_v55_miner_returning_inputs(bq_client,seasons,at)
+            except Exception as exc:
+                audit['returning_inputs']={'status':'HOLD_RETURNING_SOURCE','error':type(exc).__name__+':'+str(exc)[:240]}
             try:
                 audit['box_score_version_capture']=_v55_capture_miner_box_scores(bq_client,seasons)
             except Exception as exc:
@@ -3141,7 +3453,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             seasons={int(y) for f in relevant.values()
                      if (y:=num(f.get('Season'))) is not None and y==int(y)}
             prior_market_fields,audit['prior_market_history']=_v55_miner_prior_market_context(
-                bq_client,relevant,seasons,at)
+                bq_client,relevant,seasons,at,teams,held_teams)
         except Exception as exc:
             audit['prior_market_history']={'status':'HOLD_HISTORICAL_SOURCE',
                 'error':type(exc).__name__+':'+str(exc)[:240]}
@@ -3170,6 +3482,11 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         opener=openers.get((gid,mkt,book,q['line'],q['odds'],stamp,kick))
         if opener is not None:
             opening_spreads[gid].append((stamp,book,kick,opener))
+    try:
+        from utils import add_pathi_football_key_features as pathi_generator
+    except ImportError as exc:
+        pathi_generator=None
+        audit['pathi_input_hold']=type(exc).__name__+':'+str(exc)[:240]
     for mkt in counts:
         market_rules=[r for r in rules if r['market']==mkt]
         market_atoms={name for rule in market_rules for name in rule['atoms']}
@@ -3200,14 +3517,29 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     val=s(home_priors.get(field))
                     if val and val.lower() not in ('nan','unknown','none','null','<na>'):
                         row[target]=val
-            if gid in subdivisions:
-                row.setdefault('Opponent_Subdivision',subdivisions[gid])
+            status=schedule_context.get(gid,{})
+            travel=travel_fields.get(gid,{})
+            phase=num(fixture.get('V55_Is_Regular_Season'))
+            if phase in (0,1) and 'Is_Regular_Season' not in status:
+                row['Is_Regular_Season']=phase
+            row.update(travel)
+            for key,value in status.items():
+                if key=='Neutral_Site' and key in row and row[key]!=value:
+                    for field in travel:
+                        row.pop(field,None)
+                    continue
+                row.setdefault(key,value)
+            if num(row.get('Neutral_Site'))==0:
+                row['Is_Home']=1
+            _,home,_,_,_,_=_v55_board_fixture_identity(fixture)
+            returning=returning_fields.get((num(fixture.get('Season')),home))
+            if returning is not None:
+                row.setdefault('CFBD_Returning_Pct_Receive_PPA',returning)
             row.update(score_fields.get(gid,{}))
-            row.update(ypp_fields.get(gid,{}))
             prior_market=prior_market_fields.get(gid,{})
-            if prior_market:
-                row['Prev_Open_Spread']=prior_market['Prior_Market_Opening_Spread']
-                row['Prior_Opening_Spread']=prior_market['Prior_Market_Opening_Spread']
+            row.update(prior_market)
+            if 'Prev_Open_Spread' in prior_market:
+                row['Prior_Opening_Spread']=prior_market['Prev_Open_Spread']
             canonical_id=_v55_live_id(source.get('cfbd_game_id')) or _v55_live_id(fixture.get('CFBD_Game_ID'))
             rivalry=_v55_miner_rivalry_fields(prior_meetings,fixture,canonical_id,kickoff,at)
             if rivalry:
@@ -3230,12 +3562,53 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                                     current['odds'],clock(current['quote_observed_at_utc']),kickoff))
                 if opener is not None:
                     row['Opening_'+suffix]=opener
-            # Do not map current quotes into opening fields. Venue atoms
-            # require a verified site role, which this fixture feed lacks.
+            # Role transitions can use another verified sportsbook opener
+            # for the same matchup. Keep movement atoms on same-book inputs.
+            role_row={}
+            if 'Opening_Spread' not in row and any(name.startswith(
+                    ('ROLE_FLIP_','OPP_BOUNCEBACK_','BOUNCEBACK_','CURRENT_','FAV_','DOG_'))
+                    for name in market_atoms):
+                alternatives=[(stamp,book,line) for stamp,book,kick,line in opening_spreads.get(gid,())
+                              if book!=base['book'] and kick==kickoff]
+                if alternatives:
+                    _,_,line=max(alternatives)
+                    role_row={'Opening_Spread':line}
+                    alternate_opening_games.add((gid,mkt))
+            road_inputs_ready=num(row.get('Neutral_Site'))==0
+            if not road_inputs_ready or (num(row.get('Opening_Spread')) is None and not role_row):
+                held_role_atoms={name for name in market_atoms if name.startswith(('OPP_BOUNCEBACK_','BOUNCEBACK_'))}
+            else:
+                held_role_atoms={name for name in market_atoms if name.startswith('OPP_BOUNCEBACK_')
+                                 and (num(row.get('Opp_Prev_Is_Home')) is None or
+                                      num(row.get('Opp_Prev_Is_ML_Favorite')) is None or
+                                      num(row.get('Opp_Pregame_Prev_SU_Margin')) is None or
+                                      ('WINNING' in name and num(row.get('Opp_WinPct_Prior')) is None) or
+                                      ('BOTH_WINNING' in name and num(row.get('Team_WinPct_Prior')) is None))}
+                if any(num(row.get(field)) is None for field in
+                       ('Prev_Is_Home','Prev_Is_ML_Favorite','Pregame_Prev_SU_Margin')):
+                    held_role_atoms.update(name for name in market_atoms if name.startswith('BOUNCEBACK_'))
+            home_conf=s(row.get('Conference')).strip().lower()
+            away_conf=s(row.get('Opponent_Conference')).strip().lower()
+            if home_conf and away_conf and not {home_conf,away_conf}.intersection(
+                    {'unknown','none','nan','independent','fbs independents','fcs independents'}):
+                row.setdefault('Is_Conference_Game',int(home_conf==away_conf))
             expert_refs={}
             pt_ref=None
             pt_slate=None
+            trend_rate=num(row.get('Pathi_FB_Dog_Rate_Last10_Prior'))
+            current_spread=num(row.get('Current_Spread'))
+            if trend_rate is not None and current_spread is not None:
+                row['Pathi_FB_Usually_Dog_Now_Favorite']=int(trend_rate>=.70 and current_spread<0)
+                row['Pathi_FB_Usually_Favorite_Now_Dog']=int(trend_rate<=.30 and current_spread>0)
+            bigal_fields={}
             if mkt=='spreads':
+                if pathi_generator is not None:
+                    try:
+                        row.update(_v55_miner_pathi_inputs(row,pathi_generator))
+                    except Exception as exc:
+                        audit['pathi_input_hold']=type(exc).__name__+':'+str(exc)[:240]
+                bigal_fields=_v55_miner_bigal_inputs(row)
+                row.update(bigal_fields)
                 for q in sides.values():
                     key=(gid,s(q['book']).lower(),s(q['side']).upper(),num(q['line']),num(q['odds']),
                          clock(q['quote_observed_at_utc']),kickoff)
@@ -3266,37 +3639,32 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     value=atoms.get(name)
                     blocker_counts[name,'missing' if value is None else 'true' if value else 'false']+=1
             _v55_miner_fill_conference_atoms(atoms,market_atoms)
-            # Straightforward historical predicates only. More complex role
-            # flips/bounce-back systems retain MISSING until their exact
-            # frozen semantics and complete market history can be verified.
-            if 'PRIOR_FAVORITE' in market_atoms and '_PRIOR_FAVORITE_ATOM' in prior_market:
-                atoms.setdefault('PRIOR_FAVORITE',prior_market['_PRIOR_FAVORITE_ATOM'])
-            if 'ATS_WIN_STREAK_2' in market_atoms and '_ATS_WIN_STREAK_2_ATOM' in prior_market:
-                atoms.setdefault('ATS_WIN_STREAK_2',prior_market['_ATS_WIN_STREAK_2_ATOM'])
-            # Only those canonical team-ID predicates with an unambiguous
-            # exact school match can be evaluated without the legacy provider's
-            # full mascot/string convention. Never override the frozen provider.
             for atom,value in _v55_miner_verified_team_atoms(market_atoms,fixture.get('Home_Team')).items():
                 atoms.setdefault(atom,value)
-            # Verified positive firings give a lower bound, so an incomplete
-            # family cannot establish a negative multi-signal observation.
-            if atoms.get('EXPERT_PATHI_MULTI_2PLUS') is False and expert_refs:
-                atoms.pop('EXPERT_PATHI_MULTI_2PLUS')
-            alternate_book=None
-            if 'Opening_Spread' not in row and any(
-                    V55_MINER_OPENING_ROLE_ATOMS.intersection(r['atoms']) for r in market_rules):
-                alternatives=[(stamp,book,line) for stamp,book,kick,line in opening_spreads.get(gid,())
-                              if book!=base['book'] and kick==kickoff]
-                if alternatives:
-                    _,alternate_book,line=max(alternatives)
-                    # An alternate recorded opener can supply the frozen role
-                    # atoms only. Keep the execution quote and movement inputs intact.
-                    alternate_row={**row,'Opening_Spread':line}
-                    atoms.update({r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
-                        pd.DataFrame([alternate_row]).dropna(axis=1,how='all'),for_live=True,
-                        market=mkt,enforce_support_floor=False)
-                        if r['name'] in V55_MINER_OPENING_ROLE_ATOMS and r['name'] not in atoms})
-                    alternate_opening_games.add((gid,mkt))
+            # A partial expert catalog can establish a positive, but cannot
+            # establish absence across the entire family.
+            for name in ('EXPERT_PATHI_ANY','EXPERT_PATHI_MULTI_2PLUS'):
+                if atoms.get(name) is False:
+                    atoms.pop(name)
+            if atoms.get('EXPERT_BIGAL_ANY') is False and len(bigal_fields)<3:
+                atoms.pop('EXPERT_BIGAL_ANY')
+            if role_row:
+                role_atoms=V55_MINER_OPENING_ROLE_ATOMS | {
+                    name for name in market_atoms if name.startswith(('ROLE_FLIP_','OPP_BOUNCEBACK_','BOUNCEBACK_'))}
+                atoms.update({r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
+                    pd.DataFrame([{**row,**role_row}]).dropna(axis=1,how='all'),for_live=True,
+                    market=mkt,enforce_support_floor=False) if r['name'] in role_atoms})
+            for atom in held_role_atoms:
+                atoms.pop(atom,None)
+            if any(num(row.get(field)) is None for field in ('Team_Travel_Miles','Opp_Travel_Miles')):
+                for name in ('TEAM_TRAVEL_ADV_500_PLUS','TEAM_TRAVEL_DISADV_500_PLUS'):
+                    atoms.pop(name,None)
+            # The provider treats a null sample-size as a false predicate.
+            # Preserve a coverage gap when the denominator is unobserved.
+            if num(row.get('CFBD_Games_Prior')) is None:
+                for name in market_atoms:
+                    if name.startswith('CFBD_QB_'):
+                        atoms.pop(name,None)
             stats['source_games']+=1
             screen_key=f'{gid}|{mkt}'
             screen_record={'game_id':gid,'market':mkt,
@@ -3315,16 +3683,20 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'verified_total_opener':num(row.get('Opening_Total')) is not None,
                     'pt_snapshot_matched':gid in pt_rows,
                     'pt_frozen_atom_fields':gid in pt_games,
-                    'expert_context':bool(expert_refs),
+                    'expert_context':bool(expert_refs) or any(k.startswith(('Pathi_FB_','BigAl_CF')) for k in row),
                     'opponent_adjusted_ypp':gid in ypp_fields,
                     'prior_meeting':bool(rivalry),
-                    'verified_prior_market':bool(prior_market),
+                    'verified_prior_market':'Prev_Open_Spread' in prior_market,
                 }}
             for atom_name in sorted(market_atoms):
                 state=('EXCLUDED_WEATHER' if _v55_miner_live_excluded_atom(atom_name) else
                        ('TRUE' if atoms[atom_name] else 'FALSE') if atom_name in atoms else 'MISSING')
                 screen_record['atom_values'][atom_name]=state
                 screen_atom_coverage[mkt,atom_name][state]+=1
+                if state=='MISSING':
+                    reason=_v55_miner_missing_input_reason(
+                        atom_name,row,pathi_generator is not None,bool(bigal_fields))
+                    missing_input_reasons[mkt,atom_name][reason]+=1
             screen_games[screen_key]=screen_record
             for rule in market_rules:
                 rid=rule['rule_id']
@@ -3432,6 +3804,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             name:{state:screen_atom_coverage[mkt,name][state]
                   for state in ('TRUE','FALSE','MISSING','EXCLUDED_WEATHER')}
             for name in names}
+        audit['by_market'][mkt]['missing_atom_reasons']={
+            name:dict(missing_input_reasons[mkt,name]) for name in names if missing_input_reasons[mkt,name]}
         audit['by_market'][mkt]['system_coverage']={
             r['rule_id']:{state:screen_system_coverage[mkt,r['rule_id']][state]
                           for state in ('FIRED','FALSE_CONDITION','MISSING_ATOMS','INACTIVE_WEATHER')}
@@ -3453,6 +3827,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             'cfbd_matchups':audit.get('recovered_cfbd_matchup_games_by_field',{}),
             'prior_scores':audit.get('completed_game_inputs',{}),
             'prior_market':audit.get('prior_market_history',{}),
+            'travel':audit.get('travel_inputs',{}),
+            'returning':audit.get('returning_inputs',{}),
+            'pathi_input_hold':audit.get('pathi_input_hold'),
             'ypp':audit.get('ypp_inputs',{}),
             'opening_quotes':audit.get('opening_quotes',{}),
         },
