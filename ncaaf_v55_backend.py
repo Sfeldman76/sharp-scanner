@@ -3565,13 +3565,15 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             # Role transitions can use another verified sportsbook opener
             # for the same matchup. Keep movement atoms on same-book inputs.
             role_row={}
+            alternate_book=None
+            alternate_role_atoms=set()
             if 'Opening_Spread' not in row and any(name.startswith(
                     ('ROLE_FLIP_','OPP_BOUNCEBACK_','BOUNCEBACK_','CURRENT_','FAV_','DOG_'))
                     for name in market_atoms):
                 alternatives=[(stamp,book,line) for stamp,book,kick,line in opening_spreads.get(gid,())
                               if book!=base['book'] and kick==kickoff]
                 if alternatives:
-                    _,_,line=max(alternatives)
+                    _,alternate_book,line=max(alternatives)
                     role_row={'Opening_Spread':line}
                     alternate_opening_games.add((gid,mkt))
             road_inputs_ready=num(row.get('Neutral_Site'))==0
@@ -3651,9 +3653,11 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             if role_row:
                 role_atoms=V55_MINER_OPENING_ROLE_ATOMS | {
                     name for name in market_atoms if name.startswith(('ROLE_FLIP_','OPP_BOUNCEBACK_','BOUNCEBACK_'))}
-                atoms.update({r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
+                alternate_results={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
                     pd.DataFrame([{**row,**role_row}]).dropna(axis=1,how='all'),for_live=True,
-                    market=mkt,enforce_support_floor=False) if r['name'] in role_atoms})
+                    market=mkt,enforce_support_floor=False) if r['name'] in role_atoms}
+                atoms.update(alternate_results)
+                alternate_role_atoms.update(alternate_results)
             for atom in held_role_atoms:
                 atoms.pop(atom,None)
             if any(num(row.get(field)) is None for field in ('Team_Travel_Miles','Opp_Travel_Miles')):
@@ -3747,7 +3751,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'prospective_evaluation_after_quote':True,'producer':V55_LIBRARY_MINER_PRODUCER,
                     **({'opponent_adjusted_ypp_provenance':feature_provenance} if feature_provenance else {}),
                     **({'opening_role_reference_book':alternate_book} if alternate_book and
-                        V55_MINER_OPENING_ROLE_ATOMS.intersection(rule['atoms']) else {}),
+                        alternate_role_atoms.intersection(rule['atoms']) else {}),
                     **({'expert_context_capture_refs':sorted(set(expert_refs.values()))} if expert_refs and
                         any(a.startswith(('EXPERT_PATHI','EXPERT_BIGAL')) for a in rule['atoms']) else {}),
                     **({'prediction_tracker_snapshot_ref':pt_ref,
