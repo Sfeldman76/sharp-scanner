@@ -2394,9 +2394,15 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                                'prior_games_without_verified_opener']+=1
             if prior_home is not None:
                 state[prefix+'Prev_Is_Home']=prior_home
-            if dogs and len(dogs)==min(10,len(prior)) and all(v is not None for v in dogs):
-                state[prefix+'Pathi_FB_Dog_Rate_Last10_Prior']=sum(dogs)/len(dogs)
+            # Match the frozen Pathi rolling mean: last ten game positions,
+            # with null roles excluded and at least one observation required.
+            # Hold the rate if a kickoff tie made the sequence ambiguous.
+            observed_dogs=[role for role in dogs if role is not None]
+            if observed_dogs and len(dogs)==min(10,len(prior)):
+                state[prefix+'Pathi_FB_Dog_Rate_Last10_Prior']=sum(observed_dogs)/len(observed_dogs)
                 status['sides_with_pathi_moneyline_role_history']+=1
+                coverage='complete' if len(observed_dogs)==len(dogs) else 'partial'
+                status[f'sides_with_{coverage}_pathi_moneyline_role_history']+=1
             if not lines or lines[0] is None:
                 status['sides_without_latest_opener']+=1
                 continue
@@ -3429,7 +3435,7 @@ def _v55_miner_missing_input_reason(atom,row,pathi_ready,bigal_ready):
         if 'CROSSED_KEY' in atom and num(row.get('Opening_Spread')) is None:
             return 'SAME_BOOK_RECORDED_OPENER_UNAVAILABLE'
         if 'USUALLY_' in atom or atom.endswith('_HISTORY'):
-            return 'PRIOR_MONEYLINE_ROLE_HISTORY_INCOMPLETE'
+            return 'NO_USABLE_PRIOR_MONEYLINE_ROLE_OR_CURRENT_SPREAD'
         return 'PATHI_RULE_INPUT_OR_COMPLETE_FAMILY_EVIDENCE_UNAVAILABLE'
     if atom.startswith('EXPERT_BIGAL_'):
         return ('BIG_AL_FAMILY_EVALUATION_INCOMPLETE' if bigal_ready
