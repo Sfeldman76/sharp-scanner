@@ -2129,6 +2129,137 @@ def _v55_miner_score_history(rows, at):
     return teams,held_teams,dict(counts)
 
 
+def _v55_snapshot_prior_market(bq_client, targets, seasons, at):
+    """Recover historical prices from paired, prekick snapshots of verified CFBD games."""
+    from google.cloud import bigquery
+
+    source='scores_with_features'
+    if not targets:
+        return {}, {'status':'NO_PRIOR_GAME_TARGETS','source':source}
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter('seasons','INT64',sorted(seasons)),
+        bigquery.ArrayQueryParameter('ids','STRING',sorted(targets)),
+        bigquery.ScalarQueryParameter('earliest','TIMESTAMP',min(targets.values())),
+        bigquery.ScalarQueryParameter('as_of','TIMESTAMP',at),
+    ])
+    sql=r"""
+    CREATE TEMP FUNCTION team_key(s STRING) AS (
+      REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(COALESCE(s, ''), NFKD), r'[^a-z0-9]', '')
+    );
+    WITH finals AS (
+      SELECT season, game_id, home_team, away_team
+      FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_finals_v1`
+      WHERE season IN UNNEST(@seasons) AND ingested_at <= @as_of
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY season, game_id ORDER BY ingested_at DESC) = 1
+        AND api_completed IS TRUE
+    ),
+    kickoffs AS (
+      SELECT season, game_id, MIN(kickoff_at) AS kickoff
+      FROM `sharplogger.sharp_data.ncaaf_cfbd_postgame_game_sides_v1`
+      WHERE season IN UNNEST(@seasons)
+      GROUP BY season, game_id
+      HAVING COUNT(DISTINCT kickoff_at) = 1
+    ),
+    aliases AS (
+      SELECT DISTINCT f.season, CAST(f.game_id AS STRING) AS game_id, k.kickoff,
+          f.home_team, f.away_team, team_key(h) AS home, team_key(a) AS away
+      FROM finals AS f
+      JOIN kickoffs AS k USING (season, game_id)
+      LEFT JOIN `sharplogger.sharp_data.ncaaf_game_travel_reference` AS r
+        ON r.Season = f.season AND CAST(r.Game_ID AS STRING) = CAST(f.game_id AS STRING)
+      CROSS JOIN UNNEST(ARRAY_CONCAT(
+        [f.home_team, r.Home_School, r.Home_Team_Norm],
+        SPLIT(COALESCE(r.Home_Alias_Tokens, ''), '|')
+      )) AS h
+      CROSS JOIN UNNEST(ARRAY_CONCAT(
+        [f.away_team, r.Away_School, r.Away_Team_Norm],
+        SPLIT(COALESCE(r.Away_Alias_Tokens, ''), '|')
+      )) AS a
+      WHERE team_key(h) != '' AND team_key(a) != '' AND team_key(h) != team_key(a)
+        AND k.kickoff >= TIMESTAMP_TRUNC(@earliest, HOUR) AND k.kickoff < @as_of
+    ),
+    snapshots AS (
+      SELECT DISTINCT team_key(Home_Team_Norm) AS home, team_key(Away_Team_Norm) AS away,
+        team_key(Outcome) AS outcome, feat_Game_Start AS quote_start,
+        LOWER(TRIM(Bookmaker)) AS book, Snapshot_Timestamp AS observed,
+        IF(LOWER(TRIM(Market)) IN ('spread','spreads'), 'spreads', 'h2h') AS market,
+        First_Line_Value AS opener, Odds_Price AS odds
+      FROM `sharplogger.sharp_data.scores_with_features`
+      WHERE UPPER(TRIM(Sport)) = 'NCAAF'
+        AND feat_Game_Start >= TIMESTAMP_TRUNC(@earliest, HOUR) AND feat_Game_Start < @as_of
+        AND LOWER(TRIM(Market)) IN ('spread','spreads','h2h','ml','moneyline')
+        AND NULLIF(TRIM(Bookmaker), '') IS NOT NULL
+        AND Snapshot_Timestamp < feat_Game_Start
+    ),
+    identity_candidates AS (
+      SELECT DISTINCT s.home, s.away, s.quote_start, a.season, a.game_id, a.kickoff,
+        a.home_team, a.away_team
+      FROM (SELECT DISTINCT home, away, quote_start FROM snapshots) AS s
+      JOIN aliases AS a USING (home, away)
+      WHERE TIMESTAMP_TRUNC(s.quote_start, HOUR) = TIMESTAMP_TRUNC(a.kickoff, HOUR)
+    ),
+    identity AS (
+      SELECT * FROM identity_candidates
+      QUALIFY COUNT(*) OVER (PARTITION BY home, away, quote_start) = 1
+    ),
+    eligible AS (
+      SELECT s.*, i.season, i.game_id, i.kickoff, i.home_team, i.away_team
+      FROM snapshots AS s JOIN identity AS i USING (home, away, quote_start)
+      WHERE i.game_id IN UNNEST(@ids) AND s.observed < i.kickoff
+    ),
+    pairs AS (
+      SELECT DISTINCT h.season, h.game_id, h.kickoff, h.home_team, h.away_team, h.market,
+        GREATEST(h.observed, a.observed) AS pair_at,
+        ABS(TIMESTAMP_DIFF(h.observed, a.observed, MICROSECOND)) AS pair_gap,
+        IF(h.market = 'spreads', h.opener, NULL) AS home_opener,
+        IF(h.market = 'h2h', h.odds, NULL) AS home_odds,
+        IF(h.market = 'h2h', a.odds, NULL) AS away_odds
+      FROM eligible AS h
+      JOIN eligible AS a USING (season, game_id, market, book, home, away, quote_start)
+      WHERE h.outcome = h.home AND a.outcome = a.away
+        AND ABS(TIMESTAMP_DIFF(h.observed, a.observed, MICROSECOND)) <= 120000000
+        AND (
+          (h.market = 'spreads' AND h.opener BETWEEN -100 AND 100
+            AND ABS(h.opener + a.opener) < 0.000001)
+          OR (h.market = 'h2h' AND ABS(h.odds) >= 100 AND ABS(a.odds) >= 100
+            AND NOT IS_INF(h.odds) AND NOT IS_INF(a.odds))
+        )
+    )
+    SELECT * FROM pairs
+    QUALIFY DENSE_RANK() OVER (
+      PARTITION BY season, game_id, market
+      ORDER BY IF(market = 'spreads', pair_at, NULL) ASC,
+               IF(market = 'h2h', pair_at, NULL) DESC, pair_gap ASC
+    ) = 1
+    """
+    by_side=defaultdict(lambda:defaultdict(set))
+    for row in bq_client.query(sql,job_config=config).result():
+        gid=_v55_live_id(row['game_id'])
+        home,away=(_v55_cfbd_school_key(row[key]) for key in ('home_team','away_team'))
+        if clock(row['kickoff'])!=targets.get(gid) or not home or not away or home==away:
+            continue
+        season=row['season']
+        if row['market']=='spreads' and (opener:=num(row['home_opener'])) is not None:
+            by_side[season,gid,home]['opener'].add(opener)
+            by_side[season,gid,away]['opener'].add(-opener)
+        elif row['market']=='h2h':
+            hp,ap=profit(row['home_odds']),profit(row['away_odds'])
+            if hp is not None and ap is not None:
+                by_side[season,gid,home]['dog'].add(int(hp>ap))
+                by_side[season,gid,away]['dog'].add(int(ap>hp))
+        else:
+            continue
+        by_side[season,gid,home]['home'].add(1)
+        by_side[season,gid,away]['home'].add(0)
+    fields={key:{name:next(iter(values)) for name,values in results.items() if len(values)==1}
+            for key,results in by_side.items()}
+    return fields,{'status':'READ' if fields else 'NO_VERIFIED_SNAPSHOT_PAIRS','source':source,
+        'target_games':len(targets),
+        'games_with_paired_openers':len({key[:2] for key,values in fields.items() if 'opener' in values}),
+        'games_with_paired_moneylines':len({key[:2] for key,values in fields.items() if 'dog' in values}),
+        'conflicting_side_fields':sum(len(values)>1 for side in by_side.values() for values in side.values())}
+
+
 def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, held_teams):
     """Attach recorded openers to consecutive prior CFBD finals for live screening."""
     from google.cloud import bigquery
@@ -2181,6 +2312,27 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
         for _,game_id,_,_ in games:
             game_teams[season,game_id].add(team)
 
+    # Use the same sequence for the scan and the evaluator. Include the
+    # eleventh game only to detect ambiguous ordering at the ten-game boundary.
+    prior_by_team={}
+    for fixture in fixtures.values():
+        _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
+        season=num(fixture.get('Season'))
+        if not kickoff or at>=kickoff or not home or not away or season not in seasons:
+            continue
+        for team in (home,away):
+            key=(season,team)
+            if key not in held_teams and key not in prior_by_team:
+                prior_by_team[key]=sorted((g for g in teams.get(key,()) if g[0]<at),reverse=True)[:11]
+    targets={prior_id:played for history in prior_by_team.values()
+             for played,prior_id,_,_ in history[:10]}
+    snapshot_fields={}
+    try:
+        snapshot_fields,snapshot_audit=_v55_snapshot_prior_market(bq_client,targets,seasons,at)
+    except Exception as exc:
+        snapshot_audit={'status':'HOLD_HISTORICAL_SNAPSHOTS','source':'scores_with_features',
+                        'error':type(exc).__name__+':'+str(exc)[:240]}
+
     result={}
     for gid,fixture in fixtures.items():
         _,home,away,kickoff,_,_=_v55_board_fixture_identity(fixture)
@@ -2192,7 +2344,7 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
         for team,prefix in ((home,''),(away,'Opp_')):
             if (season,team) in held_teams:
                 continue
-            prior=sorted((g for g in teams.get((season,team),()) if g[0]<at),reverse=True)[:11]
+            prior=prior_by_team.get((season,team),())
             if not prior or (len(prior)>1 and prior[0][0]==prior[1][0]):
                 status['sides_without_unique_latest_game']+=1
                 continue
@@ -2213,15 +2365,27 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                 candidates=id_matches or pair_matches
                 priced={line for _,line,_,_ in candidates if line is not None}
                 observed_roles={dog for _,_,_,dog in candidates if dog in (0,1)}
+                snapshot=snapshot_fields.get((season,game_id,team),{})
+                snapshot_dog=snapshot.get('dog')
+                if not observed_roles and snapshot_dog is not None:
+                    observed_roles.add(snapshot_dog)
+                    status['prior_sides_with_snapshot_moneyline']+=1
                 dogs.append(next(iter(observed_roles)) if len(observed_roles)==1 and not ambiguous_pair else None)
                 if index==0 and not ambiguous_pair:
                     roles={role for _,_,role,_ in candidates if role in (0,1)}
+                    if not roles and snapshot.get('home') is not None:
+                        roles.add(snapshot['home'])
                     if len(roles)==1:
                         prior_home=next(iter(roles))
+                snapshot_opener=snapshot.get('opener')
                 if len(priced)==1 and not ambiguous_pair:
                     lines.append(next(iter(priced)))
                     if index<2:
                         status['prior_games_matched_by_id' if id_matches else 'prior_games_matched_by_pair']+=1
+                elif not priced and not ambiguous_pair and snapshot_opener is not None:
+                    lines.append(snapshot_opener)
+                    if index<2:
+                        status['prior_games_matched_by_snapshot']+=1
                 else:
                     lines.append(None)
                     if index<2:
@@ -2256,6 +2420,7 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
             result[gid]=state
     return result, {'status':'READ' if result else 'NO_VERIFIED_PRIOR_MARKET_ROWS',
                     'source':'ncaaf_historical_game_side_context',
+                    'snapshot_fallback':snapshot_audit,
                     'chronology':'CONSECUTIVE_CFBD_FINALS_AND_MATCHED_RECORDED_OPEN',
                     **dict(status)}
 
