@@ -3672,6 +3672,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                                       'error':type(exc).__name__+':'+str(exc)[:240]}
     opening_totals=_v55_miner_alternate_opening_totals(books,openers)
     alternate_total_games=set()
+    alternate_cross_market_games=set()
+    alternate_role_spread_games=set()
     opening_spreads=defaultdict(list)
     for (gid,mkt,book),sides in books.items():
         if mkt!='spreads' or len(sides)!=2:
@@ -3800,6 +3802,16 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             pt_slate=None
             trend_rate=num(row.get('Pathi_FB_Dog_Rate_Last10_Prior'))
             current_spread=num(row.get('Current_Spread'))
+            role_spread_book=None
+            if (mkt=='h2h' and trend_rate is not None and current_spread is None
+                    and market_atoms.intersection(('ROLE_FLIP_DOG_TO_FAV_HISTORY','ROLE_FLIP_FAV_TO_DOG_HISTORY'))):
+                spread_pair=pairs.get((gid,'spreads'))
+                if spread_pair:
+                    candidate=spread_pair[1]['HOME']
+                    if clock(candidate['kickoff_utc'])==kickoff:
+                        current_spread=num(candidate['line'])
+                        role_spread_book=candidate['book']
+                        alternate_role_spread_games.add((gid,mkt))
             if trend_rate is not None and current_spread is not None:
                 row['Pathi_FB_Usually_Dog_Now_Favorite']=int(trend_rate>=.70 and current_spread<0)
                 row['Pathi_FB_Usually_Favorite_Now_Dog']=int(trend_rate<=.30 and current_spread>0)
@@ -3876,6 +3888,28 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     alternate_total_atoms.update(total_results)
                     if total_results:
                         alternate_total_games.add((gid,mkt))
+            cross_market_reference_book=None
+            alternate_cross_market_atoms=set()
+            if (mkt in ('spreads','totals')
+                    and any(name.startswith(('IMPLIED_','SPREAD_TOTAL_RATIO_','BIG_FAVORITE_LOW_',
+                                             'BIG_DOG_LOW_IMPLIED_SCORE'))
+                            for name in market_atoms-atoms.keys())
+                    and (num(row.get('Opening_Spread')) is None or num(row.get('Opening_Total')) is None)):
+                spreads={book:(stamp,line) for stamp,book,kick,line in opening_spreads.get(gid,())
+                         if kick==kickoff and abs(line)<=100}
+                compatible=[(min(stamp,spreads[book][0]),book,spreads[book][1],total)
+                            for stamp,book,kick,total in opening_totals.get(gid,())
+                            if kick==kickoff and book in spreads and book!=base['book']]
+                if compatible:
+                    _,cross_market_reference_book,spread,total=max(compatible)
+                    cross_results={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
+                        pd.DataFrame([{**row,'Opening_Spread':spread,'Opening_Total':total}]).dropna(axis=1,how='all'),
+                        for_live=True,market=mkt,enforce_support_floor=False)
+                        if r['family']=='CROSS_MARKET_STRUCTURE' and r['name'] in market_atoms and r['name'] not in atoms}
+                    atoms.update(cross_results)
+                    alternate_cross_market_atoms.update(cross_results)
+                    if cross_results:
+                        alternate_cross_market_games.add((gid,mkt))
             if any(num(row.get(field)) is None for field in ('Team_Travel_Miles','Opp_Travel_Miles')):
                 for name in ('TEAM_TRAVEL_ADV_500_PLUS','TEAM_TRAVEL_DISADV_500_PLUS'):
                     atoms.pop(name,None)
@@ -3902,6 +3936,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'verified_spread_opener':num(row.get('Opening_Spread')) is not None,
                     'verified_total_opener':num(row.get('Opening_Total')) is not None,
                     'verified_alternate_total_band_opener':bool(alternate_total_atoms),
+                    'verified_alternate_cross_market_openers':bool(alternate_cross_market_atoms),
+                    'verified_alternate_role_current_spread':bool(role_spread_book),
                     'pt_snapshot_matched':gid in pt_rows,
                     'pt_frozen_atom_fields':gid in pt_games,
                     'expert_context':bool(expert_refs) or any(k.startswith(('Pathi_FB_','BigAl_CF')) for k in row),
@@ -3971,6 +4007,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                         alternate_role_atoms.intersection(rule['atoms']) else {}),
                     **({'opening_total_band_reference_book':total_reference_book} if total_reference_book and
                         alternate_total_atoms.intersection(rule['atoms']) else {}),
+                    **({'cross_market_opening_reference_book':cross_market_reference_book}
+                       if alternate_cross_market_atoms.intersection(rule['atoms']) else {}),
+                    **({'current_role_spread_reference_book':role_spread_book} if role_spread_book and
+                        {'ROLE_FLIP_DOG_TO_FAV_HISTORY','ROLE_FLIP_FAV_TO_DOG_HISTORY'}.intersection(rule['atoms']) else {}),
                     **({'expert_context_capture_refs':sorted(set(expert_refs.values()))} if expert_refs and
                         any(a.startswith(('EXPERT_PATHI','EXPERT_BIGAL')) for a in rule['atoms']) else {}),
                     **({'prediction_tracker_snapshot_ref':pt_ref,
@@ -3987,6 +4027,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit['recovered_cfbd_matchup_games_by_field']={field:len(gids) for field,gids in recovered_fields.items()}
     audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
     audit['alternate_opening_total_band_game_markets']=len(alternate_total_games)
+    audit['alternate_cross_market_opening_game_markets']=len(alternate_cross_market_games)
+    audit['alternate_h2h_pathi_current_spread_game_markets']=len(alternate_role_spread_games)
     audit['miner_expert_quote_inputs']['matched_current_spread_games']=len(supported_expert_games)
     audit.setdefault('miner_pt_live_inputs',{'status':'NOT_EVALUATED'}).update(
         matched_spread_games=sum(gid in pt_rows for gid,mkt in pairs if mkt=='spreads'),
@@ -6438,7 +6480,155 @@ def activation_main(argv=None):
 
 
 
+V55_QB_LIVE_COLUMNS=(
+    'CFBD_QB_Game_PPA_SeasonPrior','CFBD_Opp_QB_Game_PPA_SeasonPrior',
+    'CFBD_QB_Game_Pass_Success_SeasonPrior','CFBD_Opp_QB_Game_Pass_Success_SeasonPrior',
+)
+
+
+def _v55_qb_cfbd_read(path,params,token):
+    from urllib.parse import urlencode
+    from urllib.request import Request,urlopen
+    request=Request('https://api.collegefootballdata.com'+path+'?'+urlencode(params),
+                    headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
+    with urlopen(request,timeout=45) as response:
+        payload=json.load(response)
+    if isinstance(payload,dict):
+        payload=payload.get('data')
+    if not isinstance(payload,list):
+        raise ValueError('UNRECOGNIZED_CFBD_RESPONSE:'+path)
+    return payload
+
+
+def _v55_qb_forward_values(games,ppa_rows,success_rows,at):
+    from statistics import mean,median
+
+    games_by_week=defaultdict(set)
+    future={}
+    for game in games:
+        gid=_v55_live_id(game.get('id'))
+        kickoff=clock(game.get('startDate'))
+        week=num(game.get('week'))
+        home,away=(_v55_cfbd_school_key(game.get(key)) for key in ('homeTeam','awayTeam'))
+        if not gid or not kickoff or week is None or not home or not away or home==away:
+            continue
+        completed=game.get('completed') is True
+        for team in (home,away):
+            games_by_week[week,team].add((gid,kickoff,completed))
+        if at<kickoff<=at+timedelta(days=7) and game.get('completed') is False:
+            future[gid]=(home,away)
+    ppa=defaultdict(list)
+    passing=defaultdict(list)
+    for rows,kind in ((ppa_rows,'ppa'),(success_rows,'success')):
+        for row in rows:
+            if s(row.get('position')).upper()!='QB':
+                continue
+            key=(num(row.get('week')),_v55_cfbd_school_key(row.get('team')))
+            candidates=games_by_week.get(key,())
+            if len(candidates)!=1:
+                continue
+            _,kickoff,completed=next(iter(candidates))
+            if not completed or kickoff>=at:
+                continue
+            if kind=='ppa':
+                raw=row.get('averagePPA') or {}
+                if isinstance(raw,dict) and (value:=num(raw.get('all',raw.get('total')))) is not None:
+                    ppa[key].append(value)
+            else:
+                raw=row.get('passing') or {}
+                if isinstance(raw,dict):
+                    plays,successes=num(raw.get('plays')),num(raw.get('successes'))
+                    if plays is not None and successes is not None and 0<=successes<=plays and plays>0:
+                        passing[key].append((plays,successes))
+    ppa_by_team=defaultdict(list)
+    success_by_team=defaultdict(list)
+    for (_,team),values in ppa.items():
+        ppa_by_team[team].append(median(values))
+    for (_,team),values in passing.items():
+        success_by_team[team].append(sum(suc for _,suc in values)/sum(plays for plays,_ in values))
+    ppa_prior={team:mean(values) for team,values in ppa_by_team.items()}
+    success_prior={team:mean(values) for team,values in success_by_team.items()}
+    return {(gid,team):dict(zip(V55_QB_LIVE_COLUMNS,(
+                ppa_prior.get(team),ppa_prior.get(opp),success_prior.get(team),success_prior.get(opp))))
+            for gid,(home,away) in future.items() for team,opp in ((home,away),(away,home))}
+
+
+def refresh_qb_main(argv=None):
+    parser=argparse.ArgumentParser(description='Refresh QB priors for upcoming NCAAF games')
+    parser.add_argument('--season',type=int,default=datetime.now(timezone.utc).year)
+    parser.add_argument('--apply',action='store_true',help='Refresh QB values in BigQuery for the next seven days')
+    args=parser.parse_args(argv)
+    token=os.getenv('CFBD_API_KEY','')
+    if not token:
+        parser.error('CFBD_API_KEY is required')
+    from google.cloud import bigquery
+    at=datetime.now(timezone.utc)
+    scope={'year':args.season,'seasonType':'both'}
+    games=_v55_qb_cfbd_read('/games',{**scope,'classification':'fbs'},token)
+    weeks=sorted({int(w) for row in games if row.get('completed') is True
+                  and (kick:=clock(row.get('startDate'))) and kick<at
+                  and (w:=num(row.get('week'))) is not None})
+    ppa,success=[],[]
+    failed=set()
+    for week in weeks:
+        params={**scope,'week':week,'excludeGarbageTime':'true'}
+        for path,extra,output in (
+            ('/ppa/players/games',{'position':'QB'},ppa),
+            ('/stats/player/success/game',{},success),
+        ):
+            try:
+                output.extend(_v55_qb_cfbd_read(path,{**params,**extra},token))
+            except (OSError,ValueError) as exc:
+                failed.add(path)
+                print(json.dumps({'source':path,'week':week,'fetch_error':type(exc).__name__,
+                                  'http_status':getattr(exc,'code',None)}),file=sys.stderr)
+    # Keep any prior stored value when a source returned an incomplete batch.
+    priors=_v55_qb_forward_values(
+        games,[] if '/ppa/players/games' in failed else ppa,
+        [] if '/stats/player/success/game' in failed else success,at)
+    table='sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1'
+    client=bigquery.Client(project='sharplogger')
+    params=[bigquery.ScalarQueryParameter('season','INT64',args.season)]
+    config=bigquery.QueryJobConfig(query_parameters=params)
+    targets=client.query(f"""SELECT Game_ID, Team_Key FROM `{table}`
+                            WHERE Season=@season AND Game_Date>CURRENT_TIMESTAMP()""",
+                         job_config=config).result()
+    payload={}
+    for row in targets:
+        gid=_v55_live_id(row['Game_ID'])
+        team=row['Team_Key']
+        values=priors.get((gid,_v55_cfbd_school_key(team)),{})
+        if values and any(v is not None for v in values.values()):
+            payload[gid,team]={'game_id':gid,'team_key':team,**values}
+    rows=list(payload.values())
+    report={'ppa_input_rows':len(ppa),'success_input_rows':len(success),
+            'matched_future_sides':len(rows),'held_sources':sorted(failed),'field_coverage':{
+                k:sum(r.get(k) is not None for r in rows) for k in V55_QB_LIVE_COLUMNS}}
+    print(json.dumps(report,sort_keys=True))
+    if not rows:
+        return 1
+    if not args.apply:
+        return 0
+    fields=V55_QB_LIVE_COLUMNS
+    casts={k:f'SAFE_CAST(JSON_VALUE(j,"$.{k}") AS FLOAT64)' for k in fields}
+    assignments=', '.join(f'{k}=COALESCE({casts[k]},t.{k})' for k in fields)
+    changed=' OR '.join(f'({casts[k]} IS NOT NULL AND t.{k} IS DISTINCT FROM {casts[k]})' for k in fields)
+    sql=f"""UPDATE `{table}` AS t SET {assignments}
+            FROM UNNEST(JSON_QUERY_ARRAY(@rows)) AS j
+            WHERE t.Season=@season AND t.Game_Date>CURRENT_TIMESTAMP()
+              AND CAST(t.Game_ID AS STRING)=JSON_VALUE(j,'$.game_id')
+              AND t.Team_Key=JSON_VALUE(j,'$.team_key') AND ({changed})"""
+    config=bigquery.QueryJobConfig(query_parameters=[
+        *params,bigquery.ScalarQueryParameter('rows','STRING',json.dumps(rows,allow_nan=False))])
+    job=client.query(sql,job_config=config)
+    job.result()
+    print(json.dumps({'updated_game_sides':job.num_dml_affected_rows}))
+    return 0
+
+
 if __name__=='__main__':
+    if len(sys.argv)>1 and sys.argv[1]=='refresh-qb':
+        raise SystemExit(refresh_qb_main(sys.argv[2:]))
     if len(sys.argv)>1 and sys.argv[1]=='activate':
         raise SystemExit(activation_main(sys.argv[2:]))
     raise SystemExit(main())
