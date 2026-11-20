@@ -90,6 +90,9 @@ def _v55_miner_verified_team_atoms(market_atoms, home):
 V55_MINER_OPENING_ROLE_ATOMS=frozenset(
     ('CURRENT_FAVORITE','CURRENT_DOG',*(f'{role}_{lo}_{hi}' for role in ('FAV','DOG')
       for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)))))
+V55_MINER_OPENING_TOTAL_ATOMS=frozenset((
+    'TOTAL_0_45','TOTAL_45_52','TOTAL_52_60','TOTAL_60_99','TOTAL_55_PLUS','TOTAL_58_PLUS',
+))
 BRAINS=frozenset(('CORE','STAT','SYSTEM_MINER','PATHI','BIG_AL','PREDICTION_TRACKER','MARKET_RICH'))
 
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False,default=str).encode()).hexdigest()
@@ -1884,7 +1887,7 @@ V55_LIBRARY_MINER_PRODUCER = 'V55_FROZEN_LIBRARY_MARKET_SHADOW'
 
 
 def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_limit=0,
-                        as_of=False):
+                        as_of=False, include_under=False):
     """Read explicit openers on the exact quote, or from earlier same-book rows."""
     from google.cloud import bigquery
     from ncaaf_v55_board import _norm_team
@@ -1924,12 +1927,14 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_l
         m=market(q.get('market'))
         side=s(q.get('side')).upper()
         gid=s(q.get('game_id'))
-        if gid not in fixtures or (m,side) not in (('spreads','HOME'),('totals','OVER')):
+        if gid not in fixtures or ((m,side) not in (('spreads','HOME'),('totals','OVER'))
+                                   and not (include_under and (m,side)==('totals','UNDER'))):
             continue
         key=(gid,m,q['book'],q['line'],q['odds'],clock(q['quote_observed_at_utc']),
              clock(q['kickoff_utc']))
         home,away=fixtures[gid]
-        wanted[(home,away,m,home if m=='spreads' else 'OVER',*key[2:])]=key
+        wanted[(home,away,m,home if m=='spreads' else side,*key[2:])]=(
+            (*key,'UNDER') if side=='UNDER' else key)
     candidates=defaultdict(set)
     def opener_key(row):
         m=market(row['Market'])
@@ -2417,11 +2422,14 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
             state['Prior_Market_Opening_Spread']=line
             state['Prior_Market_Game_Date']=prior[0][0].date().isoformat()
             status['games_with_prior_priced_game']+=1
+            last_won=prior[0][2]-prior[0][3]+line>0
             if len(lines)>=2 and lines[1] is not None:
-                last_won=prior[0][2]-prior[0][3]+line>0
                 second_won=prior[1][2]-prior[1][3]+lines[1]>0
                 state['ATS_Win_Streak_Prior']=int(last_won)+int(last_won and second_won)
                 status['games_with_two_prior_priced_games']+=1
+            elif not last_won:
+                state['ATS_Win_Streak_Prior']=0
+                status['ats_streak_resolved_by_latest_noncover']+=1
         if state:
             result[gid]=state
     return result, {'status':'READ' if result else 'NO_VERIFIED_PRIOR_MARKET_ROWS',
@@ -3449,6 +3457,25 @@ def _v55_miner_missing_input_reason(atom,row,pathi_ready,bigal_ready):
     return 'FROZEN_PROVIDER_INPUT_UNAVAILABLE'
 
 
+def _v55_miner_alternate_opening_totals(books,openers):
+    """Index mutually verified same-book opening totals for standalone bands."""
+    totals=defaultdict(list)
+    for (gid,mkt,book),sides in books.items():
+        if mkt!='totals' or not {'OVER','UNDER'}<=sides.keys():
+            continue
+        over,under=(sides[side] for side in ('OVER','UNDER'))
+        kick=clock(over['kickoff_utc'])
+        over_at=clock(over['quote_observed_at_utc'])
+        under_at=clock(under['quote_observed_at_utc'])
+        if not kick or not over_at or not under_at or kick!=clock(under['kickoff_utc']):
+            continue
+        over_open=num(openers.get((gid,mkt,book,over['line'],over['odds'],over_at,kick)))
+        under_open=num(openers.get((gid,mkt,book,under['line'],under['odds'],under_at,kick,'UNDER')))
+        if over_open is not None and under_open is not None and over_open>0 and abs(over_open-under_open)<1e-6:
+            totals[gid].append((min(over_at,under_at),book,kick,over_open))
+    return totals
+
+
 def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, bucket,
                                  bq_client=None, horizon_days=7, now=None):
     """Evaluate the published full-history library with its pinned atom provider."""
@@ -3631,7 +3658,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     if bq_client is not None:
         try:
             openers,audit['opening_quotes']=v55_observed_openers(
-                bq_client,board_rows,paired,now=at,horizon_days=horizon_days,as_of=True)
+                bq_client,board_rows,paired,now=at,horizon_days=horizon_days,as_of=True,include_under=True)
         except Exception as exc:
             audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
                                      'error':type(exc).__name__+':'+str(exc)[:200]}
@@ -3643,6 +3670,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         except Exception as exc:
             audit['rivalry_history']={'status':'HOLD_CFBD_MEETING_HISTORY',
                                       'error':type(exc).__name__+':'+str(exc)[:240]}
+    opening_totals=_v55_miner_alternate_opening_totals(books,openers)
+    alternate_total_games=set()
     opening_spreads=defaultdict(list)
     for (gid,mkt,book),sides in books.items():
         if mkt!='spreads' or len(sides)!=2:
@@ -3832,6 +3861,21 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 alternate_role_atoms.update(alternate_results)
             for atom in held_role_atoms:
                 atoms.pop(atom,None)
+            total_reference_book=None
+            alternate_total_atoms=set()
+            total_atoms=(market_atoms & V55_MINER_OPENING_TOTAL_ATOMS)-atoms.keys()
+            if total_atoms and num(row.get('Opening_Total')) is None:
+                alternatives=[(stamp,book,line) for stamp,book,kick,line in opening_totals.get(gid,())
+                              if book!=base['book'] and kick==kickoff]
+                if alternatives:
+                    _,total_reference_book,line=max(alternatives)
+                    total_results={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
+                        pd.DataFrame([{**row,'Opening_Total':line}]).dropna(axis=1,how='all'),for_live=True,
+                        market=mkt,enforce_support_floor=False) if r['name'] in total_atoms}
+                    atoms.update(total_results)
+                    alternate_total_atoms.update(total_results)
+                    if total_results:
+                        alternate_total_games.add((gid,mkt))
             if any(num(row.get(field)) is None for field in ('Team_Travel_Miles','Opp_Travel_Miles')):
                 for name in ('TEAM_TRAVEL_ADV_500_PLUS','TEAM_TRAVEL_DISADV_500_PLUS'):
                     atoms.pop(name,None)
@@ -3857,6 +3901,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'cfbd_prior_snapshot':bool(source_time and source_time<=at<kickoff),
                     'verified_spread_opener':num(row.get('Opening_Spread')) is not None,
                     'verified_total_opener':num(row.get('Opening_Total')) is not None,
+                    'verified_alternate_total_band_opener':bool(alternate_total_atoms),
                     'pt_snapshot_matched':gid in pt_rows,
                     'pt_frozen_atom_fields':gid in pt_games,
                     'expert_context':bool(expert_refs) or any(k.startswith(('Pathi_FB_','BigAl_CF')) for k in row),
@@ -3924,6 +3969,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     **({'opponent_adjusted_ypp_provenance':feature_provenance} if feature_provenance else {}),
                     **({'opening_role_reference_book':alternate_book} if alternate_book and
                         alternate_role_atoms.intersection(rule['atoms']) else {}),
+                    **({'opening_total_band_reference_book':total_reference_book} if total_reference_book and
+                        alternate_total_atoms.intersection(rule['atoms']) else {}),
                     **({'expert_context_capture_refs':sorted(set(expert_refs.values()))} if expert_refs and
                         any(a.startswith(('EXPERT_PATHI','EXPERT_BIGAL')) for a in rule['atoms']) else {}),
                     **({'prediction_tracker_snapshot_ref':pt_ref,
@@ -3939,6 +3986,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit.setdefault('rivalry_history',{'status':'NOT_EVALUATED'})['games_with_prior_meetings']=len(rivalry_games)
     audit['recovered_cfbd_matchup_games_by_field']={field:len(gids) for field,gids in recovered_fields.items()}
     audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
+    audit['alternate_opening_total_band_game_markets']=len(alternate_total_games)
     audit['miner_expert_quote_inputs']['matched_current_spread_games']=len(supported_expert_games)
     audit.setdefault('miner_pt_live_inputs',{'status':'NOT_EVALUATED'}).update(
         matched_spread_games=sum(gid in pt_rows for gid,mkt in pairs if mkt=='spreads'),
