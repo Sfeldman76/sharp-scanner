@@ -2270,7 +2270,10 @@ def _v55_snapshot_prior_market(bq_client, targets, seasons, at):
             AND NOT IS_INF(h.odds) AND NOT IS_INF(a.odds))
         )
     )
-    SELECT * FROM pairs
+    SELECT *,
+      MIN(home_opener) OVER (PARTITION BY season, game_id, market) AS home_opener_min,
+      MAX(home_opener) OVER (PARTITION BY season, game_id, market) AS home_opener_max
+    FROM pairs
     QUALIFY DENSE_RANK() OVER (
       PARTITION BY season, game_id, market
       ORDER BY IF(market = 'spreads', pair_at, NULL) ASC,
@@ -2278,6 +2281,7 @@ def _v55_snapshot_prior_market(bq_client, targets, seasons, at):
     ) = 1
     """
     by_side=defaultdict(lambda:defaultdict(set))
+    bounds_by_side=defaultdict(set)
     for row in bq_client.query(sql,job_config=config).result():
         gid=_v55_live_id(row['game_id'])
         home,away=(_v55_cfbd_school_key(row[key]) for key in ('home_team','away_team'))
@@ -2287,6 +2291,10 @@ def _v55_snapshot_prior_market(bq_client, targets, seasons, at):
         if row['market']=='spreads' and (opener:=num(row['home_opener'])) is not None:
             by_side[season,gid,home]['opener'].add(opener)
             by_side[season,gid,away]['opener'].add(-opener)
+            low,high=num(row['home_opener_min']),num(row['home_opener_max'])
+            if low is not None and high is not None and low<=opener<=high:
+                bounds_by_side[season,gid,home].add((low,high))
+                bounds_by_side[season,gid,away].add((-high,-low))
         elif row['market']=='h2h':
             hp,ap=profit(row['home_odds']),profit(row['away_odds'])
             if hp is not None and ap is not None:
@@ -2298,7 +2306,12 @@ def _v55_snapshot_prior_market(bq_client, targets, seasons, at):
         by_side[season,gid,away]['home'].add(0)
     fields={key:{name:next(iter(values)) for name,values in results.items() if len(values)==1}
             for key,results in by_side.items()}
+    for key,bounds in bounds_by_side.items():
+        if len(by_side[key]['opener'])>1 and len(bounds)==1:
+            fields[key]['ats_opener_bounds']=next(iter(bounds))
     return fields,{'status':'READ' if fields else 'NO_VERIFIED_SNAPSHOT_PAIRS','source':source,
+        'sides_with_conflicting_openers_and_ats_bounds':sum(
+            'ats_opener_bounds' in side for side in fields.values()),
         'target_games':len(targets),
         'games_with_paired_openers':len({key[:2] for key,values in fields.items() if 'opener' in values}),
         'games_with_paired_moneylines':len({key[:2] for key,values in fields.items() if 'dog' in values}),
@@ -2394,6 +2407,8 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                 status['sides_without_unique_latest_game']+=1
                 continue
             lines=[]
+            ats_covers=[]
+            ats_bounds_used=[]
             dogs=[]
             prior_home=None
             for index,(played,game_id,points,conceded) in enumerate(prior[:10]):
@@ -2437,6 +2452,24 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                         status['prior_games_with_ambiguous_pair' if ambiguous_pair else
                                'prior_games_with_conflicting_openers' if priced else
                                'prior_games_without_verified_opener']+=1
+                if not prefix and index<2:
+                    margin=points-conceded
+                    line=lines[-1]
+                    cover=None if line is None else margin+line>0
+                    used_bounds=False
+                    # Preserve the exact-opener hold. The boolean cover test
+                    # can only use these lines when the answer is invariant.
+                    if cover is None and not priced and not ambiguous_pair:
+                        bounds=snapshot.get('ats_opener_bounds')
+                        if bounds:
+                            low,high=bounds
+                            if margin+low>0 or margin+high<=0:
+                                cover=margin+low>0
+                                used_bounds=True
+                            else:
+                                status['ats_prior_sides_with_line_dependent_cover']+=1
+                    ats_covers.append(cover)
+                    ats_bounds_used.append(used_bounds)
             if prior_home is not None:
                 state[prefix+'Prev_Is_Home']=prior_home
             # Match the frozen Pathi rolling mean: last ten game positions,
@@ -2448,6 +2481,19 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                 status['sides_with_pathi_moneyline_role_history']+=1
                 coverage='complete' if len(observed_dogs)==len(dogs) else 'partial'
                 status[f'sides_with_{coverage}_pathi_moneyline_role_history']+=1
+            if not prefix and ats_covers and ats_covers[0] is not None:
+                last_won=ats_covers[0]
+                second_won=ats_covers[1] if len(ats_covers)>1 else None
+                if second_won is not None:
+                    state['ATS_Win_Streak_Prior']=int(last_won)+int(last_won and second_won)
+                    if lines[0] is not None and len(lines)>1 and lines[1] is not None:
+                        status['games_with_two_prior_priced_games']+=1
+                elif not last_won:
+                    state['ATS_Win_Streak_Prior']=0
+                    status['ats_streak_resolved_by_latest_noncover']+=1
+                if ('ATS_Win_Streak_Prior' in state and
+                        (ats_bounds_used[0] or last_won and len(ats_bounds_used)>1 and ats_bounds_used[1])):
+                    status['ats_streak_resolved_by_unanimous_cover_outcome']+=1
             if not lines or lines[0] is None:
                 status['sides_without_latest_opener']+=1
                 continue
@@ -2462,14 +2508,6 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
             state['Prior_Market_Opening_Spread']=line
             state['Prior_Market_Game_Date']=prior[0][0].date().isoformat()
             status['games_with_prior_priced_game']+=1
-            last_won=prior[0][2]-prior[0][3]+line>0
-            if len(lines)>=2 and lines[1] is not None:
-                second_won=prior[1][2]-prior[1][3]+lines[1]>0
-                state['ATS_Win_Streak_Prior']=int(last_won)+int(last_won and second_won)
-                status['games_with_two_prior_priced_games']+=1
-            elif not last_won:
-                state['ATS_Win_Streak_Prior']=0
-                status['ats_streak_resolved_by_latest_noncover']+=1
         if state:
             result[gid]=state
     return result, {'status':'READ' if result else 'NO_VERIFIED_PRIOR_MARKET_ROWS',
