@@ -2300,6 +2300,8 @@ def _v55_snapshot_prior_market(bq_client, targets, seasons, at):
             if hp is not None and ap is not None:
                 by_side[season,gid,home]['dog'].add(int(hp>ap))
                 by_side[season,gid,away]['dog'].add(int(ap>hp))
+                by_side[season,gid,home]['favorite'].add(int(hp<ap))
+                by_side[season,gid,away]['favorite'].add(int(ap<hp))
         else:
             continue
         by_side[season,gid,home]['home'].add(1)
@@ -2411,6 +2413,7 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
             ats_bounds_used=[]
             dogs=[]
             prior_home=None
+            prior_moneyline_role=None
             for index,(played,game_id,points,conceded) in enumerate(prior[:10]):
                 if index+1<len(prior) and played==prior[index+1][0]:
                     break
@@ -2427,6 +2430,11 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                 observed_roles={dog for _,_,_,dog in candidates if dog in (0,1)}
                 snapshot=snapshot_fields.get((season,game_id,team),{})
                 snapshot_dog=snapshot.get('dog')
+                snapshot_favorite=snapshot.get('favorite')
+                if (index==0 and not ambiguous_pair and snapshot_dog in (0,1) and
+                        snapshot_favorite in (0,1) and snapshot_dog+snapshot_favorite<=1 and
+                        (not observed_roles or observed_roles=={snapshot_dog})):
+                    prior_moneyline_role=(snapshot_favorite,snapshot_dog)
                 if not observed_roles and snapshot_dog is not None:
                     observed_roles.add(snapshot_dog)
                     status['prior_sides_with_snapshot_moneyline']+=1
@@ -2494,8 +2502,17 @@ def _v55_miner_prior_market_context(bq_client, fixtures, seasons, at, teams, hel
                 if ('ATS_Win_Streak_Prior' in state and
                         (ats_bounds_used[0] or last_won and len(ats_bounds_used)>1 and ats_bounds_used[1])):
                     status['ats_streak_resolved_by_unanimous_cover_outcome']+=1
+            if not prefix and len(ats_covers)>1 and ats_covers[0] is None and ats_covers[1] is False:
+                state['Verified_Prior_ATS_Two_Wins_Impossible']=1
+                status['ats_streak_ruled_out_by_second_game_noncover']+=1
             if not lines or lines[0] is None:
                 status['sides_without_latest_opener']+=1
+                if prior_moneyline_role is not None:
+                    favorite,dog=prior_moneyline_role
+                    state.update({prefix+'Prev_Is_ML_Favorite':favorite,
+                                  prefix+'Prev_Is_ML_Dog':dog})
+                    state[prefix+'Prior_Role_From_Verified_Moneyline']=1
+                    status['latest_prior_sides_with_moneyline_role_fallback']+=1
                 continue
             line=lines[0]
             # Match the original Miner live role-context builder's
@@ -3535,6 +3552,70 @@ def _v55_miner_missing_input_reason(atom,row,pathi_ready,bigal_ready):
     return 'FROZEN_PROVIDER_INPUT_UNAVAILABLE'
 
 
+def _v55_miner_pathi_catalog(evaluate_atoms):
+    """Read the exact expert catalog from the already pinned atom provider."""
+    import ast
+    import inspect
+    import textwrap
+
+    try:
+        source=ast.parse(textwrap.dedent(inspect.getsource(evaluate_atoms)))
+        declarations=[node.value for node in ast.walk(source) if isinstance(node,ast.Assign)
+                      and any(isinstance(t,ast.Name) and t.id=='pathi_cols' for t in node.targets)]
+        if len(declarations)==1:
+            fields=ast.literal_eval(declarations[0])
+            if isinstance(fields,(list,tuple)) and fields and all(
+                    isinstance(field,str) and field.startswith('Pathi_FB_') for field in fields):
+                return tuple(dict.fromkeys(fields))
+    except (OSError,TypeError,ValueError,SyntaxError):
+        pass
+    return ()
+
+
+def _v55_miner_pathi_maximum(row,catalog):
+    # Without known neutral-site status, road-side components remain possible.
+    keys=list(catalog)
+    if num(row.get('Neutral_Site'))!=1:
+        keys.extend(field+'__ROAD_SIDE' for field in catalog)
+    return sum(num(row.get(field))!=0 for field in keys)
+
+
+def _v55_miner_provably_false_role_atoms(row,opening,requested):
+    """Short-circuit the frozen conjunctions only on observed disqualifiers."""
+    favorite=num(row.get('Prev_Is_ML_Favorite'))
+    dog=num(row.get('Prev_Is_ML_Dog'))
+    false_atoms=set()
+    if favorite==0 or opening is not None and opening<=0:
+        false_atoms.add('ROLE_FLIP_FAVORITE_TO_DOG')
+    if dog==0 or opening is not None and opening>=0:
+        false_atoms.add('ROLE_FLIP_DOG_TO_FAVORITE')
+    opp_margin=next((value for key in ('Context_Opp_Prev_SU_Margin','Opp_Pregame_Prev_SU_Margin',
+                                      'Opp_Prev_SU_Margin') if (value:=num(row.get(key))) is not None),None)
+    team_margin=next((value for key in ('Pregame_Prev_SU_Margin','Prev_SU_Margin',
+                                       'Context_Prev_SU_Margin') if (value:=num(row.get(key))) is not None),None)
+    team_pct=num(row.get('Team_WinPct_Prior'))
+    opp_pct=num(row.get('Opp_WinPct_Prior'))
+    for prefix,wrong_line,margin,win_pct,other_pct,spread in (
+        ('OPP_',opening is not None and opening>=0,opp_margin,opp_pct,team_pct,
+         None if opening is None else -opening),
+        ('',opening is not None and opening<=0,team_margin,team_pct,opp_pct,opening),
+    ):
+        wrong_site=num(row.get('Is_Home'))==(0 if prefix else 1)
+        base_false=(wrong_line or wrong_site or num(row.get(prefix.title()+'Prev_Is_Home'))==0
+                    or num(row.get(prefix.title()+'Prev_Is_ML_Favorite'))==0
+                    or margin is not None and margin>=0)
+        if base_false:
+            false_atoms.add(prefix+'BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG')
+        winning_false=base_false or win_pct is not None and win_pct<.500
+        if winning_false:
+            false_atoms.add(prefix+'BOUNCEBACK_WINNING_TEAM')
+        if winning_false or other_pct is not None and other_pct<.500:
+            false_atoms.add(prefix+'BOUNCEBACK_BOTH_WINNING_TEAMS')
+        if winning_false or spread is not None and not 5<=spread<=7.5:
+            false_atoms.add(prefix+'BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5')
+    return false_atoms & requested
+
+
 def _v55_miner_alternate_opening_totals(books,openers):
     """Index mutually verified same-book opening totals for standalone bands."""
     totals=defaultdict(list)
@@ -3754,6 +3835,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     alternate_total_games=set()
     alternate_cross_market_games=set()
     recorded_cross_market_games=set()
+    recorded_total_band_games=set()
+    resolved_role_false=Counter()
+    resolved_pathi_false=Counter()
+    pathi_catalog=_v55_miner_pathi_catalog(evaluate_atoms)
     recorded_cross_market_held=0
     alternate_role_spread_games=set()
     opening_spreads=defaultdict(list)
@@ -3943,6 +4028,12 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             for name in ('EXPERT_PATHI_ANY','EXPERT_PATHI_MULTI_2PLUS'):
                 if atoms.get(name) is False:
                     atoms.pop(name)
+            if mkt=='spreads' and pathi_catalog:
+                pathi_maximum=_v55_miner_pathi_maximum(row,pathi_catalog)
+                for name,threshold in (('EXPERT_PATHI_ANY',1),('EXPERT_PATHI_MULTI_2PLUS',2)):
+                    if name in market_atoms and name not in atoms and pathi_maximum<threshold:
+                        atoms[name]=False
+                        resolved_pathi_false[name]+=1
             if atoms.get('EXPERT_BIGAL_ANY') is False and len(bigal_fields)<3:
                 atoms.pop('EXPERT_BIGAL_ANY')
             if role_row:
@@ -3955,12 +4046,32 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 alternate_role_atoms.update(alternate_results)
             for atom in held_role_atoms:
                 atoms.pop(atom,None)
+            opening_role_spread=next((value for value in
+                (num(row.get('Consensus_Open_Spread')),num(row.get('Opening_Spread')),
+                 num(role_row.get('Opening_Spread'))) if value is not None),None)
+            for name in _v55_miner_provably_false_role_atoms(row,opening_role_spread,market_atoms-atoms.keys()):
+                atoms[name]=False
+                resolved_role_false[name]+=1
+            if num(row.get('Verified_Prior_ATS_Two_Wins_Impossible'))==1:
+                atoms.setdefault('ATS_WIN_STREAK_2',False)
             total_reference_book=None
+            recorded_total_band_evidence=None
             alternate_total_atoms=set()
             total_atoms=(market_atoms & V55_MINER_OPENING_TOTAL_ATOMS)-atoms.keys()
             if total_atoms and num(row.get('Opening_Total')) is None:
                 alternatives=[(stamp,book,line) for stamp,book,kick,line in opening_totals.get(gid,())
                               if book!=base['book'] and kick==kickoff]
+                if not alternatives:
+                    candidates=[(book==base['book'],*values['totals'],book)
+                                for book,values in recorded_opening_references.get((gid,kickoff),{}).items()
+                                if 'totals' in values]
+                    if candidates:
+                        _,stamp,line,book=max(candidates)
+                        alternatives=[(stamp,book,line)]
+                        recorded_total_band_evidence={
+                            'book':book,'source':'sharplogger.sharp_data.moves_with_features_merged',
+                            'total_observed_at_utc':stamp.isoformat(),'opening_total':line,
+                        }
                 if alternatives:
                     _,total_reference_book,line=max(alternatives)
                     total_results={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
@@ -3969,7 +4080,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     atoms.update(total_results)
                     alternate_total_atoms.update(total_results)
                     if total_results:
-                        alternate_total_games.add((gid,mkt))
+                        if recorded_total_band_evidence:
+                            recorded_total_band_games.add((gid,mkt))
+                        else:
+                            alternate_total_games.add((gid,mkt))
             cross_market_reference_book=None
             alternate_cross_market_atoms=set()
             recorded_cross_market_evidence=None
@@ -4046,7 +4160,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'cfbd_prior_snapshot':bool(source_time and source_time<=at<kickoff),
                     'verified_spread_opener':num(row.get('Opening_Spread')) is not None,
                     'verified_total_opener':num(row.get('Opening_Total')) is not None,
-                    'verified_alternate_total_band_opener':bool(alternate_total_atoms),
+                    'verified_alternate_total_band_opener':bool(
+                        alternate_total_atoms and not recorded_total_band_evidence),
+                    **({'recorded_total_band_opener':recorded_total_band_evidence}
+                       if alternate_total_atoms and recorded_total_band_evidence else {}),
                     'verified_alternate_cross_market_openers':bool(
                         alternate_cross_market_atoms and not recorded_cross_market_evidence),
                     **({'recorded_cross_market_openers':recorded_cross_market_evidence}
@@ -4121,6 +4238,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                         alternate_role_atoms.intersection(rule['atoms']) else {}),
                     **({'opening_total_band_reference_book':total_reference_book} if total_reference_book and
                         alternate_total_atoms.intersection(rule['atoms']) else {}),
+                    **({'recorded_total_band_opening_evidence':recorded_total_band_evidence}
+                       if recorded_total_band_evidence and alternate_total_atoms.intersection(rule['atoms']) else {}),
                     **({'cross_market_opening_reference_book':cross_market_reference_book}
                        if alternate_cross_market_atoms.intersection(rule['atoms']) else {}),
                     **({'cross_market_recorded_opening_evidence':recorded_cross_market_evidence}
@@ -4143,6 +4262,9 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit['recovered_cfbd_matchup_games_by_field']={field:len(gids) for field,gids in recovered_fields.items()}
     audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
     audit['alternate_opening_total_band_game_markets']=len(alternate_total_games)
+    audit['recorded_opening_total_band_game_markets']=len(recorded_total_band_games)
+    audit['role_atoms_resolved_false_by_observed_disqualifier']=dict(resolved_role_false)
+    audit['pathi_atoms_resolved_false_by_component_bound']=dict(resolved_pathi_false)
     audit['alternate_cross_market_opening_game_markets']=len(alternate_cross_market_games)
     audit['recorded_cross_market_opening_game_markets']=len(recorded_cross_market_games)
     audit['cross_market_game_markets_without_recorded_reference']=recorded_cross_market_held
