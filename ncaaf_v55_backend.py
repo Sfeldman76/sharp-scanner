@@ -89,7 +89,8 @@ def _v55_miner_verified_team_atoms(market_atoms, home):
 
 V55_MINER_OPENING_ROLE_ATOMS=frozenset(
     ('CURRENT_FAVORITE','CURRENT_DOG',*(f'{role}_{lo}_{hi}' for role in ('FAV','DOG')
-      for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)))))
+      for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99))),
+     *(f'DOG_{label}_PLUS' for label in ('6P5','7','8','9','10'))))
 V55_MINER_OPENING_TOTAL_ATOMS=frozenset((
     'TOTAL_0_45','TOTAL_45_52','TOTAL_52_60','TOTAL_60_99','TOTAL_55_PLUS','TOTAL_58_PLUS',
 ))
@@ -1886,7 +1887,7 @@ V55_RECOVERED_MARKET_PRODUCER = 'V55_RECOVERED_FROZEN_V5_MARKET_SHADOW'
 V55_LIBRARY_MINER_PRODUCER = 'V55_FROZEN_LIBRARY_MARKET_SHADOW'
 
 
-def _v55_recorded_opener_pairs(captures, recorded_lines):
+def _v55_recorded_opener_pairs(captures, recorded_lines, *, earliest=False):
     """Find unambiguous two-sided recorded openers using actual pregame snapshots."""
     pairs={}
     for (fixture,mkt,book,kick,stamp),sides in captures.items():
@@ -1902,13 +1903,13 @@ def _v55_recorded_opener_pairs(captures, recorded_lines):
         elif a<=0 or abs(a-b)>1e-6:
             continue
         key=(fixture,mkt,book,kick)
-        if key not in pairs or stamp>pairs[key][0]:
+        if key not in pairs or (stamp<pairs[key][0] if earliest else stamp>pairs[key][0]):
             pairs[key]=(stamp,a)
     return pairs
 
 
 def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_limit=0,
-                        as_of=False, include_under=False, paired_reference=None):
+                        as_of=False, include_under=False, paired_reference=None, paired_first_reference=None):
     """Read explicit openers on the exact quote, or from earlier same-book rows."""
     from google.cloud import bigquery
     from ncaaf_v55_board import _norm_team
@@ -1987,7 +1988,7 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_l
         captured=key[-2]
         if not (captured and key[-1] and first<=captured<key[-1] and captured<=now):
             continue
-        if paired_reference is not None:
+        if paired_reference is not None or paired_first_reference is not None:
             home,away,mkt,side,book,_,_,_,kick=key
             fixture=(home,away)
             expected_sides=fixture if mkt=='spreads' else ('OVER','UNDER')
@@ -2011,15 +2012,19 @@ def v55_observed_openers(bq_client, board, quotes, *, now, horizon_days, trace_l
                      opener_lookback_days=lookback_days,
                      matched_without_exact_current_snapshot=len(matched.keys()-exact_matches),
                      missing_opener_quotes=len(wanted)-len(candidates))
-    if paired_reference is not None:
-        pairs=_v55_recorded_opener_pairs(captures,recorded_lines)
+    if paired_reference is not None or paired_first_reference is not None:
         fixture_ids=defaultdict(list)
         for gid,fixture in fixtures.items():
             fixture_ids[fixture].append(gid)
-        for (fixture,mkt,book,kick),quote in pairs.items():
-            for gid in fixture_ids[fixture]:
-                paired_reference.setdefault((gid,kick),{}).setdefault(book,{})[mkt]=quote
-        audit['recorded_reference_pairs_by_market']=dict(Counter(key[1] for key in pairs))
+        for earliest,reference in ((False,paired_reference),(True,paired_first_reference)):
+            if reference is None:
+                continue
+            pairs=_v55_recorded_opener_pairs(captures,recorded_lines,earliest=earliest)
+            for (fixture,mkt,book,kick),quote in pairs.items():
+                for gid in fixture_ids[fixture]:
+                    reference.setdefault((gid,kick),{}).setdefault(book,{})[mkt]=quote
+            if not earliest:
+                audit['recorded_reference_pairs_by_market']=dict(Counter(key[1] for key in pairs))
     if trace_limit and len(matched)<len(wanted):
         try:
             sample=[(k,v) for k,v in sorted(wanted.items(),key=lambda item: item[1][0])
@@ -3473,6 +3478,20 @@ def _v55_miner_pathi_inputs(row, generator):
             if name=='Pathi_FB_Dog_TotalSpread_Gap_LE10' and num(side.get(name+'_DataReady'))!=1:
                 continue
             result[name+suffix]=int(value)
+        # The original threshold formulas are unavailable. On a line that
+        # stays positive, a move to the opposite side of a key is impossible
+        # if either endpoint contradicts its direction. Leave touches and
+        # possible crossings to an exact frozen implementation.
+        side_open=(-opening if road else opening) if opening is not None else None
+        side_current=-current if road else current
+        if side_open is not None:
+            stayed_favorite=side_open<0 and side_current<0
+            stayed_dog=side_open>0 and side_current>0
+            for key in (3,7,10):
+                if stayed_favorite or stayed_dog and (side_open<key or side_current>key):
+                    result.setdefault(f'Pathi_FB_Dog_Moved_Below_Key_{key}'+suffix,0)
+                if stayed_favorite or stayed_dog and (side_open>key or side_current<key):
+                    result.setdefault(f'Pathi_FB_Dog_Moved_Above_Key_{key}'+suffix,0)
         rate=num(row.get(('Opp_' if road else '')+'Pathi_FB_Dog_Rate_Last10_Prior'))
         line=-current if road else current
         if rate is not None:
@@ -3709,6 +3728,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                                            'error':type(exc).__name__+':'+str(exc)[:240]}
     openers={}
     recorded_opening_references={}
+    recorded_first_opening_references={}
     prior_market_fields={}
     score_fields={}
     ypp_fields={}
@@ -3819,7 +3839,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
         try:
             openers,audit['opening_quotes']=v55_observed_openers(
                 bq_client,board_rows,paired,now=at,horizon_days=horizon_days,as_of=True,
-                include_under=True,paired_reference=recorded_opening_references)
+                include_under=True,paired_reference=recorded_opening_references,
+                paired_first_reference=recorded_first_opening_references)
         except Exception as exc:
             audit['opening_quotes']={'status':'OPENING_QUOTE_SOURCE_ERROR',
                                      'error':type(exc).__name__+':'+str(exc)[:200]}
@@ -3836,6 +3857,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     alternate_cross_market_games=set()
     recorded_cross_market_games=set()
     recorded_total_band_games=set()
+    recorded_spread_band_games=set()
+    recorded_same_book_spread_games=set()
     resolved_role_false=Counter()
     resolved_pathi_false=Counter()
     pathi_catalog=_v55_miner_pathi_catalog(evaluate_atoms)
@@ -3921,6 +3944,7 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
             row.update(Team_Norm=fixture.get('Home_Team'),Opponent_Norm=fixture.get('Away_Team'),
                        Season=fixture.get('Season'),Week=fixture.get('Week'),
                        Game_Start=base['kickoff_utc'],Snapshot_Timestamp=base['quote_observed_at_utc'])
+            recorded_same_book_spread=None
             for companion_market,side,suffix in (('spreads','HOME','Spread'),('totals','OVER','Total')):
                 companion=books.get((gid,companion_market,base['book']),{})
                 current=companion.get(side)
@@ -3930,6 +3954,16 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 row['Current_'+suffix]=current['line']
                 opener=openers.get((gid,companion_market,current['book'],current['line'],
                                     current['odds'],clock(current['quote_observed_at_utc']),kickoff))
+                if opener is None and companion_market=='spreads' and current['book']==base['book']:
+                    reference=(recorded_first_opening_references.get((gid,kickoff),{})
+                               .get(base['book'],{}).get('spreads'))
+                    if reference and reference[0]<=clock(current['quote_observed_at_utc']):
+                        stamp,opener=reference
+                        recorded_same_book_spread={
+                            'book':base['book'],'source':'sharplogger.sharp_data.moves_with_features_merged',
+                            'spread_observed_at_utc':stamp.isoformat(),'opening_spread':opener,
+                        }
+                        recorded_same_book_spread_games.add((gid,mkt))
                 if opener is not None:
                     row['Opening_'+suffix]=opener
             # Role transitions can use another verified sportsbook opener
@@ -4054,6 +4088,27 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                 resolved_role_false[name]+=1
             if num(row.get('Verified_Prior_ATS_Two_Wins_Impossible'))==1:
                 atoms.setdefault('ATS_WIN_STREAK_2',False)
+            recorded_spread_band_evidence=None
+            recorded_spread_band_atoms=set()
+            spread_band_atoms=(market_atoms & V55_MINER_OPENING_ROLE_ATOMS)-atoms.keys()
+            if spread_band_atoms and num(row.get('Opening_Spread')) is None:
+                candidates=[(*values['spreads'],book)
+                            for book,values in recorded_opening_references.get((gid,kickoff),{}).items()
+                            if 'spreads' in values]
+                if candidates:
+                    stamp,spread,book=max(candidates,key=lambda item:(item[0],item[2]))
+                    spread_results={r['name']:bool(r['mask'][0]) for r in evaluate_atoms(
+                        pd.DataFrame([{**row,'Opening_Spread':spread}]).dropna(axis=1,how='all'),
+                        for_live=True,market=mkt,enforce_support_floor=False)
+                        if r['name'] in spread_band_atoms}
+                    if spread_results:
+                        atoms.update(spread_results)
+                        recorded_spread_band_atoms.update(spread_results)
+                        recorded_spread_band_games.add((gid,mkt))
+                        recorded_spread_band_evidence={
+                            'book':book,'source':'sharplogger.sharp_data.moves_with_features_merged',
+                            'spread_observed_at_utc':stamp.isoformat(),'opening_spread':spread,
+                        }
             total_reference_book=None
             recorded_total_band_evidence=None
             alternate_total_atoms=set()
@@ -4160,6 +4215,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                     'cfbd_prior_snapshot':bool(source_time and source_time<=at<kickoff),
                     'verified_spread_opener':num(row.get('Opening_Spread')) is not None,
                     'verified_total_opener':num(row.get('Opening_Total')) is not None,
+                    **({'recorded_same_book_spread_opener':recorded_same_book_spread}
+                       if recorded_same_book_spread else {}),
+                    **({'recorded_spread_band_opener':recorded_spread_band_evidence}
+                       if recorded_spread_band_evidence else {}),
                     'verified_alternate_total_band_opener':bool(
                         alternate_total_atoms and not recorded_total_band_evidence),
                     **({'recorded_total_band_opener':recorded_total_band_evidence}
@@ -4238,6 +4297,10 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
                         alternate_role_atoms.intersection(rule['atoms']) else {}),
                     **({'opening_total_band_reference_book':total_reference_book} if total_reference_book and
                         alternate_total_atoms.intersection(rule['atoms']) else {}),
+                    **({'recorded_same_book_spread_opening_evidence':recorded_same_book_spread}
+                       if recorded_same_book_spread else {}),
+                    **({'recorded_spread_band_opening_evidence':recorded_spread_band_evidence}
+                       if recorded_spread_band_atoms.intersection(rule['atoms']) else {}),
                     **({'recorded_total_band_opening_evidence':recorded_total_band_evidence}
                        if recorded_total_band_evidence and alternate_total_atoms.intersection(rule['atoms']) else {}),
                     **({'cross_market_opening_reference_book':cross_market_reference_book}
@@ -4263,6 +4326,8 @@ def produce_v55_library_signals(board, feature_rows, quotes, *, storage_client, 
     audit['alternate_opening_role_game_markets']=len(alternate_opening_games)
     audit['alternate_opening_total_band_game_markets']=len(alternate_total_games)
     audit['recorded_opening_total_band_game_markets']=len(recorded_total_band_games)
+    audit['recorded_opening_spread_band_game_markets']=len(recorded_spread_band_games)
+    audit['recorded_same_book_spread_opening_game_markets']=len(recorded_same_book_spread_games)
     audit['role_atoms_resolved_false_by_observed_disqualifier']=dict(resolved_role_false)
     audit['pathi_atoms_resolved_false_by_component_bound']=dict(resolved_pathi_false)
     audit['alternate_cross_market_opening_game_markets']=len(alternate_cross_market_games)
